@@ -1,0 +1,17 @@
+[package]
+name = "novim-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Novim — a hybrid terminal multiplexer and modal text editor"
+
+[[bin]]
+name = "novim"
+path = "src/main.rs"
+
+[dependencies]
+novim-core = { workspace = true }
+novim-tui = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }

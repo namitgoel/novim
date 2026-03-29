@@ -1,0 +1,30 @@
+{
+  "name": "novim-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Novim - A hybrid terminal multiplexer and modal text editor",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/novim.git"
+  },
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "pnpm run build:rust && pnpm run build:ts",
+    "build:rust": "cargo build --release && pnpm run copy:native",
+    "build:ts": "pnpm --filter novim build",
+    "copy:native": "mkdir -p packages/novim/native && cp target/release/libnovim_neon.dylib packages/novim/native/novim_core.node || cp target/release/libnovim_neon.so packages/novim/native/novim_core.node || cp target/release/novim_neon.dll packages/novim/native/novim_core.node",
+    "dev": "pnpm --filter novim dev",
+    "start": "pnpm --filter novim start",
+    "clean": "cargo clean && pnpm --filter novim clean"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}

@@ -1,0 +1,44 @@
+[package]
+name = "novim-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# Regular library — no cdylib, no Neon
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+novim-types = { workspace = true }
+
+# Text buffer
+ropey = { workspace = true }
+
+# Terminal emulator
+vte = { workspace = true }
+portable-pty = { workspace = true }
+
+# Input handling (crossterm for key types only)
+crossterm = { workspace = true }
+
+# Syntax highlighting
+tree-sitter = { workspace = true }
+tree-sitter-highlight = { workspace = true }
+tree-sitter-rust = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+tree-sitter-json = { workspace = true }
+tree-sitter-toml-ng = { workspace = true }
+tree-sitter-python = { workspace = true }
+tree-sitter-md = { workspace = true }
+
+# Regex
+regex = { workspace = true }
+
+# LSP
+lsp-types = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }

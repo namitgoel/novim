@@ -1,0 +1,33 @@
+# Rust
+/target/
+Cargo.lock
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# TypeScript
+dist/
+*.tsbuildinfo
+
+# Native modules
+*.node
+packages/*/native/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Novim
+.novim/
+*.nvim

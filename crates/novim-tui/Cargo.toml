@@ -1,0 +1,14 @@
+[package]
+name = "novim-tui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+novim-core = { workspace = true }
+novim-types = { workspace = true }
+
+# TUI rendering
+ratatui = { workspace = true }
+crossterm = { workspace = true }
