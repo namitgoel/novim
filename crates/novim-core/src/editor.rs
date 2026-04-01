@@ -150,8 +150,13 @@ impl Workspace {
     }
 
     /// Poll terminal panes for output.
-    pub fn poll_terminals(&mut self) {
-        self.panes.poll_terminals();
+    pub fn poll_terminals(&mut self) -> bool {
+        self.panes.poll_terminals()
+    }
+
+    /// Resize all terminal panes in this workspace.
+    pub fn resize_terminals(&mut self, rows: u16, cols: u16) {
+        self.panes.resize_terminals(rows, cols);
     }
 
     /// Ensure an LSP client exists for the focused buffer's language.

@@ -32,7 +32,7 @@ impl<'a> Perform for GridPerformer<'a> {
     fn csi_dispatch(
         &mut self,
         params: &Params,
-        _intermediates: &[u8],
+        intermediates: &[u8],
         _ignore: bool,
         action: char,
     ) {
@@ -40,16 +40,57 @@ impl<'a> Perform for GridPerformer<'a> {
         let p1 = params.first().copied().unwrap_or(1) as usize;
         let p2 = params.get(1).copied().unwrap_or(1) as usize;
 
+        // DEC Private Mode Set/Reset: CSI ? <mode> h/l
+        let is_private = intermediates.first() == Some(&b'?');
+        if is_private {
+            match action {
+                'h' => {
+                    // Set mode
+                    for &p in &params {
+                        match p {
+                            47 | 1047 | 1049 => self.grid.enter_alternate_screen(),
+                            25 => {} // show cursor (handled by renderer)
+                            _ => {}
+                        }
+                    }
+                    return;
+                }
+                'l' => {
+                    // Reset mode
+                    for &p in &params {
+                        match p {
+                            47 | 1047 | 1049 => self.grid.leave_alternate_screen(),
+                            25 => {} // hide cursor (handled by renderer)
+                            _ => {}
+                        }
+                    }
+                    return;
+                }
+                _ => return,
+            }
+        }
+
         match action {
             'A' => self.grid.move_cursor_up(p1),
             'B' => self.grid.move_cursor_down(p1),
             'C' => self.grid.move_cursor_forward(p1),
             'D' => self.grid.move_cursor_back(p1),
             'H' | 'f' => self.grid.set_cursor(p1.saturating_sub(1), p2.saturating_sub(1)),
+            'G' | '`' => {
+                // CHA — Cursor Character Absolute (column only)
+                let col = p1.saturating_sub(1);
+                self.grid.set_cursor(self.grid.cursor_row(), col);
+            }
+            'd' => {
+                // VPA — Line Position Absolute (row only)
+                let row = p1.saturating_sub(1);
+                self.grid.set_cursor(row, self.grid.cursor_col());
+            }
             'J' => {
                 let mode = params.first().copied().unwrap_or(0);
                 match mode {
                     0 => self.grid.clear_to_end_of_screen(),
+                    1 => self.grid.clear_to_start_of_screen(),
                     2 | 3 => {
                         self.grid.clear_all();
                         self.grid.set_cursor(0, 0);
@@ -61,9 +102,21 @@ impl<'a> Perform for GridPerformer<'a> {
                 let mode = params.first().copied().unwrap_or(0);
                 match mode {
                     0 => self.grid.clear_to_end_of_line(),
+                    1 => self.grid.clear_to_start_of_line(),
                     2 => self.grid.clear_line(self.grid.cursor_row()),
                     _ => {}
                 }
+            }
+            'L' => self.grid.insert_lines(p1),
+            'M' => self.grid.delete_lines(p1),
+            'P' => self.grid.delete_chars(p1),
+            '@' => self.grid.insert_chars(p1),
+            'X' => self.grid.erase_chars(p1),
+            'r' => {
+                // DECSTBM — Set scrolling region
+                let top = params.first().copied().unwrap_or(1) as usize;
+                let bottom = params.get(1).copied().unwrap_or(self.grid.rows() as u16) as usize;
+                self.grid.set_scroll_region(top.saturating_sub(1), bottom.saturating_sub(1));
             }
             // SGR — Select Graphic Rendition (colors & styles)
             'm' => self.handle_sgr(&params),

@@ -107,9 +107,31 @@ fn apply_cursor_highlight<'a>(line: &str, spans: &[Span<'a>], display_col: usize
 }
 
 /// Render the full editor UI: panes + status bar (+ command line if active).
+/// True when the editor has a single focused terminal pane and no overlays.
+fn is_pure_terminal(state: &EditorState) -> bool {
+    if state.tabs.len() > 1 { return false; }
+    let ws = &state.tabs[state.active_tab];
+    if ws.explorer.is_some() { return false; }
+    if ws.panes.pane_count() != 1 { return false; }
+    if ws.show_buffer_list { return false; }
+    if state.show_help { return false; }
+    if state.show_workspace_list { return false; }
+    if state.mode == EditorMode::Command || state.search.active { return false; }
+    if state.finder.visible { return false; }
+    ws.panes.focused_pane().content.as_buffer_like().is_terminal()
+}
+
 pub fn render(f: &mut ratatui::Frame, state: &mut EditorState) {
     let size = f.area();
     f.render_widget(Clear, size);
+
+    let pure_terminal = is_pure_terminal(state);
+
+    // Pure terminal mode: no chrome, full-screen terminal.
+    if pure_terminal {
+        render_panes(f, size, state, true);
+        return;
+    }
 
     let in_command_mode = state.mode == EditorMode::Command;
     let in_search_mode = state.search.active;
@@ -159,7 +181,7 @@ pub fn render(f: &mut ratatui::Frame, state: &mut EditorState) {
         main_chunk
     };
 
-    render_panes(f, pane_area, state);
+    render_panes(f, pane_area, state, false);
     render_status_bar(f, status_chunk, state);
 
     if in_command_mode || in_search_mode {
@@ -230,7 +252,7 @@ fn render_tab_bar(f: &mut ratatui::Frame, area: Rect, state: &EditorState) {
     f.render_widget(widget, area);
 }
 
-fn render_panes(f: &mut ratatui::Frame, area: Rect, state: &mut EditorState) {
+fn render_panes(f: &mut ratatui::Frame, area: Rect, state: &mut EditorState, borderless: bool) {
     let idx = state.active_tab;
     let focused_id = state.tabs[idx].panes.focused_id();
     let ln_mode = state.line_number_mode;
@@ -257,7 +279,7 @@ fn render_panes(f: &mut ratatui::Frame, area: Rect, state: &mut EditorState) {
         let diags = diag_uri.and_then(|uri| ws.diagnostics.get(&uri));
         if let Some(pane) = ws.panes.get_pane_mut(*pane_id) {
             let border_color = if is_focused { focused_color } else { unfocused_color };
-            render_single_pane(f, ratatui_rect, pane, is_focused, ln_mode, border_color, diags, search_pattern.as_deref(), &syntax_theme, tab_width, word_wrap);
+            render_single_pane(f, ratatui_rect, pane, is_focused, ln_mode, border_color, diags, search_pattern.as_deref(), &syntax_theme, tab_width, word_wrap, borderless);
         }
     }
 }
@@ -274,16 +296,18 @@ fn render_single_pane(
     syntax_theme: &config::SyntaxTheme,
     tab_width: usize,
     word_wrap: bool,
+    borderless: bool,
 ) {
     let content = pane.content.as_buffer_like();
-    let available_height = area.height.saturating_sub(2) as usize;
+    let border_overhead: u16 = if borderless { 0 } else { 2 };
+    let available_height = area.height.saturating_sub(border_overhead) as usize;
     let cursor = content.cursor();
     let is_terminal = content.is_terminal();
     let selection = content.selection();
 
     // Gutter width for text area calculation
     let gutter_width: usize = if is_terminal || ln_mode == super::LineNumberMode::Off { 0 } else { 5 };
-    let text_width = (area.width.saturating_sub(2) as usize).saturating_sub(gutter_width); // minus borders
+    let text_width = (area.width.saturating_sub(border_overhead) as usize).saturating_sub(gutter_width);
 
     if !is_terminal {
         if word_wrap && text_width > 0 {
@@ -514,30 +538,36 @@ fn render_single_pane(
         screen_row += 1;
     }
 
-    let title = {
-        let name = pane.content.as_buffer_like().display_name();
-        let dirty = if pane.content.as_buffer_like().is_dirty() { " [+]" } else { "" };
-        format!(" {}{} ", name, dirty)
-    };
+    if borderless {
+        let paragraph = Paragraph::new(lines);
+        f.render_widget(paragraph, area);
+    } else {
+        let title = {
+            let name = pane.content.as_buffer_like().display_name();
+            let dirty = if pane.content.as_buffer_like().is_dirty() { " [+]" } else { "" };
+            format!(" {}{} ", name, dirty)
+        };
 
-    let border_style = Style::default().fg(border_color);
+        let border_style = Style::default().fg(border_color);
 
-    let paragraph = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .border_style(border_style),
-    );
-    f.render_widget(paragraph, area);
+        let paragraph = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(border_style),
+        );
+        f.render_widget(paragraph, area);
+    }
 
     if is_focused && available_height > 0 {
         let cursor = pane.content.as_buffer_like().cursor();
+        let border_off: u16 = if borderless { 0 } else { 1 };
         let col_offset: u16 = if is_terminal {
-            1
+            border_off
         } else if ln_mode == super::LineNumberMode::Off {
-            1
+            border_off
         } else {
-            6
+            border_off + 5
         };
 
         // Use wrap-aware cursor position if available
@@ -545,7 +575,7 @@ fn render_single_pane(
             if row < available_height {
                 f.set_cursor_position((
                     area.x + col_offset + col as u16,
-                    area.y + 1 + row as u16,
+                    area.y + border_off + row as u16,
                 ));
             }
         } else {
@@ -565,7 +595,7 @@ fn render_single_pane(
                 };
                 f.set_cursor_position((
                     area.x + col_offset + visual_col as u16,
-                    area.y + 1 + cursor_line_on_screen as u16,
+                    area.y + border_off + cursor_line_on_screen as u16,
                 ));
             }
         }

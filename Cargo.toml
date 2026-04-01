@@ -5,6 +5,7 @@ members = [
     "crates/novim-neon",
     "crates/novim-types",
     "crates/novim-cli",
+    "crates/novim-gui",
 ]
 resolver = "2"
 
@@ -54,7 +55,21 @@ clap_complete = "4"
 # Neon for Node.js FFI
 neon = { version = "1.0", default-features = false, features = ["napi-6"] }
 
+# GUI
+wgpu = "28"
+winit = "0.30"
+glyphon = "0.10"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+
 # Internal crates
 novim-types = { path = "crates/novim-types" }
 novim-core = { path = "crates/novim-core" }
 novim-tui = { path = "crates/novim-tui" }
+
+# Optimize all dependencies even in debug builds.
+# Critical for wgpu + cosmic-text which are 20-50x slower unoptimized.
+[profile.dev.package."*"]
+opt-level = 2

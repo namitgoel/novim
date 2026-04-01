@@ -8,7 +8,17 @@ mod performer;
 
 use std::io::{self, Read, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, OnceLock};
 use std::thread;
+
+/// Global waker callback — set by the GUI to wake the event loop when PTY data arrives.
+static PTY_WAKER: OnceLock<Arc<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// Register a waker that will be called from the PTY reader thread whenever new
+/// data is available.  The GUI sets this to an `EventLoopProxy::send_event` call.
+pub fn set_pty_waker(waker: Arc<dyn Fn() + Send + Sync>) {
+    PTY_WAKER.set(waker).ok();
+}
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use vte::Parser;
@@ -72,14 +82,19 @@ impl TerminalPane {
             .try_clone_reader()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
+        let waker = PTY_WAKER.get().cloned();
         let handle = thread::spawn(move || {
-            let mut buf = [0u8; 4096];
+            let mut buf = [0u8; 65536]; // 64 KB — large reads reduce syscall overhead
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break, // EOF or error, shell exited
                     Ok(n) => {
                         if tx.send(buf[..n].to_vec()).is_err() {
                             break; // Receiver dropped
+                        }
+                        // Wake the event loop so it polls immediately.
+                        if let Some(ref w) = waker {
+                            w();
                         }
                     }
                 }
@@ -171,15 +186,28 @@ impl TerminalPane {
     }
 
     /// Process any pending PTY output — call this in the event loop.
-    pub fn poll_pty(&mut self) {
-        while let Ok(data) = self.receiver.try_recv() {
-            let mut performer = GridPerformer {
-                grid: &mut self.grid,
-            };
-            for byte in &data {
-                self.parser.advance(&mut performer, *byte);
+    /// Returns `true` if any data was consumed.
+    pub fn poll_pty(&mut self) -> bool {
+        // Process at most 64 pending chunks per poll to avoid blocking the
+        // event loop when a command produces large amounts of output.
+        let mut consumed = false;
+        let mut budget = 64;
+        while budget > 0 {
+            match self.receiver.try_recv() {
+                Ok(data) => {
+                    let mut performer = GridPerformer {
+                        grid: &mut self.grid,
+                    };
+                    for byte in &data {
+                        self.parser.advance(&mut performer, *byte);
+                    }
+                    consumed = true;
+                    budget -= 1;
+                }
+                Err(_) => break,
             }
         }
+        consumed
     }
 
     /// Send a byte to the PTY (forward keyboard input).
@@ -279,8 +307,8 @@ impl TerminalLike for TerminalPane {
         true
     }
 
-    fn poll_pty(&mut self) {
-        TerminalPane::poll_pty(self);
+    fn poll_pty(&mut self) -> bool {
+        TerminalPane::poll_pty(self)
     }
 
     fn shell_cwd(&self) -> Option<std::path::PathBuf> {

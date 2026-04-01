@@ -220,14 +220,30 @@ impl PaneNode {
     }
 
     /// Poll all terminal panes for PTY output.
-    fn poll_terminals(&mut self) {
+    fn poll_terminals(&mut self) -> bool {
         match self {
             PaneNode::Leaf(pane) => {
-                pane.content.as_buffer_like_mut().poll_pty();
+                pane.content.as_buffer_like_mut().poll_pty()
             }
             PaneNode::Split { first, second, .. } => {
-                first.poll_terminals();
-                second.poll_terminals();
+                let a = first.poll_terminals();
+                let b = second.poll_terminals();
+                a || b
+            }
+        }
+    }
+
+    /// Resize all terminal panes to the given dimensions.
+    fn resize_terminals(&mut self, rows: u16, cols: u16) {
+        match self {
+            PaneNode::Leaf(pane) => {
+                if let PaneContent::Terminal(term) = &mut pane.content {
+                    term.resize(rows, cols);
+                }
+            }
+            PaneNode::Split { first, second, .. } => {
+                first.resize_terminals(rows, cols);
+                second.resize_terminals(rows, cols);
             }
         }
     }
@@ -427,8 +443,13 @@ impl PaneManager {
     }
 
     /// Poll all terminal panes for new PTY output.
-    pub fn poll_terminals(&mut self) {
-        self.root.poll_terminals();
+    pub fn poll_terminals(&mut self) -> bool {
+        self.root.poll_terminals()
+    }
+
+    /// Resize all terminal panes to the given dimensions.
+    pub fn resize_terminals(&mut self, rows: u16, cols: u16) {
+        self.root.resize_terminals(rows, cols);
     }
 
     /// Visit the pane tree, calling the visitor on each leaf to build a layout.

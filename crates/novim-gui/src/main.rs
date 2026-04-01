@@ -1,0 +1,496 @@
+//! Novim GUI — GPU-accelerated native desktop window.
+//!
+//! Uses wgpu for rendering, winit for windowing, and glyphon (cosmic-text)
+//! for high-quality text shaping and rendering. Drives the same EditorState
+//! as the TUI frontend.
+
+mod gpu;
+mod input;
+mod renderer;
+
+use crossterm::event::KeyCode;
+use novim_core::editor::{EditorState, ExecOutcome};
+use novim_core::input::{
+    key_to_command, lookup_custom_keybinding, EditorCommand, InputState,
+};
+use novim_types::EditorMode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use winit::dpi::LogicalSize;
+use winit::event::{MouseScrollDelta, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::window::Window;
+
+use gpu::GpuState;
+
+/// Custom event sent from PTY reader threads to wake the event loop.
+#[derive(Debug, Clone)]
+enum UserEvent {
+    PtyDataReady,
+}
+
+fn main() {
+    env_logger::init();
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .expect("Failed to create event loop");
+
+    // Register the PTY waker *before* any terminals are created.
+    let proxy = event_loop.create_proxy();
+    novim_core::emulator::set_pty_waker(Arc::new(move || {
+        let _ = proxy.send_event(UserEvent::PtyDataReady);
+    }));
+
+    event_loop
+        .run_app(&mut Application {
+            window_state: None,
+            file_arg: std::env::args().nth(1),
+            last_tick: Instant::now(),
+            needs_redraw: true,
+            poll_dirty: Arc::new(AtomicBool::new(false)),
+        })
+        .expect("Event loop error");
+}
+
+/// Per-window state: GPU + editor.
+pub(crate) struct WindowState {
+    gpu: GpuState,
+    editor: EditorState,
+    /// Current mouse position in grid coordinates.
+    mouse_col: u16,
+    mouse_row: u16,
+    /// Current keyboard modifier state.
+    modifiers: winit::keyboard::ModifiersState,
+    /// winit window handle (must outlive wgpu surface).
+    window: Arc<Window>,
+    /// Hash of the last rendered frame content — skip reshaping if unchanged.
+    last_frame_hash: u64,
+    /// Persistent text buffer reused across frames (avoids re-allocation).
+    cached_text_buffer: glyphon::Buffer,
+    /// Throttle window title updates (shell_cwd syscall) to ~1/sec.
+    last_title_update: Instant,
+}
+
+use std::time::{Duration, Instant};
+
+struct Application {
+    window_state: Option<WindowState>,
+    file_arg: Option<String>,
+    last_tick: Instant,
+    /// Whether a redraw is needed (set by key/mouse events, cleared after render).
+    needs_redraw: bool,
+    /// Shared flag set by the background poller when terminals/LSP produce output.
+    poll_dirty: Arc<AtomicBool>,
+}
+
+impl winit::application::ApplicationHandler<UserEvent> for Application {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window_state.is_some() {
+            return;
+        }
+
+        let (width, height) = (1200, 800);
+        let window_attributes = Window::default_attributes()
+            .with_inner_size(LogicalSize::new(width as f64, height as f64))
+            .with_title("Novim");
+        let window = Arc::new(
+            event_loop
+                .create_window(window_attributes)
+                .expect("Failed to create window"),
+        );
+
+        let mut gpu = pollster::block_on(GpuState::new(window.clone()));
+
+        let editor = if let Some(ref path) = self.file_arg {
+            EditorState::with_file(path).unwrap_or_else(|_| EditorState::new_editor())
+        } else {
+            let rows = gpu.grid_rows();
+            let cols = gpu.grid_cols();
+            EditorState::new_terminal(rows, cols)
+                .unwrap_or_else(|_| EditorState::new_editor())
+        };
+
+        let cached_text_buffer = glyphon::Buffer::new(
+            &mut gpu.font_system,
+            glyphon::Metrics::new(gpu.font_size, gpu.line_height),
+        );
+
+        self.window_state = Some(WindowState {
+            gpu,
+            editor,
+            mouse_col: 0,
+            mouse_row: 0,
+            modifiers: winit::keyboard::ModifiersState::empty(),
+            window,
+            last_frame_hash: 0,
+            cached_text_buffer,
+            last_title_update: Instant::now(),
+        });
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(state) = &mut self.window_state else {
+            return;
+        };
+
+        match event {
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            }
+
+            WindowEvent::Resized(size) => {
+                let scale = state.window.scale_factor();
+                state.gpu.resize(size.width, size.height, scale);
+                // Resize all terminal panes to match the new window dimensions.
+                let rows = state.gpu.grid_rows();
+                let cols = state.gpu.grid_cols();
+                for ws in &mut state.editor.tabs {
+                    ws.resize_terminals(rows, cols);
+                }
+                state.window.request_redraw();
+            }
+
+            WindowEvent::ModifiersChanged(mods) => {
+                state.modifiers = mods.state();
+            }
+
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let Some(key_event) =
+                    input::translate_key(&event.logical_key, event.state, state.modifiers)
+                {
+                    let screen = screen_rect(state);
+                    if handle_key(&mut state.editor, key_event, screen) {
+                        event_loop.exit();
+                        return;
+                    }
+                    self.needs_redraw = true;
+                    state.window.request_redraw();
+                }
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                state.mouse_col =
+                    (position.x as f32 / state.gpu.cell_width).floor() as u16;
+                state.mouse_row =
+                    (position.y as f32 / state.gpu.cell_height).floor() as u16;
+            }
+
+            WindowEvent::MouseInput { state: btn_state, button, .. } => {
+                if let Some(mouse_event) = input::translate_mouse_button(
+                    button,
+                    btn_state,
+                    state.mouse_col,
+                    state.mouse_row,
+                    state.modifiers,
+                ) {
+                    let screen = screen_rect(state);
+                    state.editor.handle_mouse(mouse_event, screen);
+                    self.needs_redraw = true;
+                    state.window.request_redraw();
+                }
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(pos) => {
+                        (pos.y as f32) / state.gpu.cell_height
+                    }
+                };
+                if let Some(mouse_event) =
+                    input::translate_scroll(lines, state.mouse_col, state.mouse_row)
+                {
+                    let screen = screen_rect(state);
+                    state.editor.handle_mouse(mouse_event, screen);
+                    self.needs_redraw = true;
+                    state.window.request_redraw();
+                }
+            }
+
+            WindowEvent::RedrawRequested => {
+                renderer::render(state);
+
+                // Update window title at most once per second (shell_cwd is a syscall).
+                let now = Instant::now();
+                if now.duration_since(state.last_title_update) >= Duration::from_secs(1) {
+                    state.last_title_update = now;
+                    let buf = state.editor.focused_buf();
+                    let title = if buf.is_terminal() {
+                        let pane = state.editor.tabs[state.editor.active_tab].panes.focused_pane();
+                        if let Some(cwd) = pane.content.as_buffer_like().shell_cwd() {
+                            let dir = cwd.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| cwd.to_string_lossy().to_string());
+                            format!("{} — Novim", dir)
+                        } else {
+                            "Novim".to_string()
+                        }
+                    } else {
+                        let name = buf.display_name();
+                        format!("{} — Novim", name)
+                    };
+                    state.window.set_title(&title);
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: UserEvent) {
+        // PTY data arrived — drain it immediately and request redraw.
+        self.needs_redraw = true;
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(state) = &mut self.window_state {
+            // Always drain pending PTY data (non-blocking try_recv).
+            let mut pty_dirty = false;
+            for ws in state.editor.tabs.iter_mut() {
+                if ws.poll_terminals() {
+                    pty_dirty = true;
+                }
+            }
+
+            // Poll LSP on a slower cadence (~50ms) since it's less latency-sensitive.
+            let now = Instant::now();
+            if now.duration_since(self.last_tick) >= Duration::from_millis(50) {
+                self.last_tick = now;
+                let active = state.editor.active_tab;
+                for (i, ws) in state.editor.tabs.iter_mut().enumerate() {
+                    if i != active {
+                        ws.poll_lsp();
+                    }
+                }
+                state.editor.poll_active_lsp();
+            }
+
+            let poll_dirty = self.poll_dirty.swap(false, Ordering::Relaxed);
+            if self.needs_redraw || poll_dirty || pty_dirty {
+                state.window.request_redraw();
+                self.needs_redraw = false;
+            }
+        }
+    }
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+fn screen_rect(state: &WindowState) -> novim_types::Rect {
+    novim_types::Rect::new(0, 0, state.gpu.grid_cols(), state.gpu.grid_rows())
+}
+
+/// Process a keyboard event through the editor, mirroring the TUI's dispatch.
+/// Returns true if the editor wants to quit.
+fn handle_key(
+    editor: &mut EditorState,
+    key: crossterm::event::KeyEvent,
+    screen: novim_types::Rect,
+) -> bool {
+    // Esc always resets any stuck intermediate input state.
+    if key.code == KeyCode::Esc
+        && editor.input_state != InputState::Ready
+        && !editor.finder.visible
+        && !editor.search.active
+    {
+        editor.input_state = InputState::Ready;
+        editor.status_message = Some("Cancelled".to_string());
+        return false;
+    }
+
+    // ── Finder overlay ──
+    if editor.finder.visible {
+        let cmd = match key.code {
+            KeyCode::Esc => EditorCommand::FinderDismiss,
+            KeyCode::Enter => EditorCommand::FinderAccept,
+            KeyCode::Up => EditorCommand::FinderUp,
+            KeyCode::Down => EditorCommand::FinderDown,
+            KeyCode::Backspace => EditorCommand::FinderBackspace,
+            KeyCode::Char(c) => EditorCommand::FinderInput(c),
+            _ => EditorCommand::Noop,
+        };
+        return exec(editor, cmd, screen);
+    }
+
+    // ── Completion menu ──
+    if editor.completion.visible {
+        let cmd = match key.code {
+            KeyCode::Up => EditorCommand::CompletionUp,
+            KeyCode::Down => EditorCommand::CompletionDown,
+            KeyCode::Tab | KeyCode::Enter => EditorCommand::CompletionAccept,
+            KeyCode::Esc => EditorCommand::CompletionDismiss,
+            _ => {
+                editor.completion.visible = false;
+                editor.completion.items.clear();
+                EditorCommand::Noop
+            }
+        };
+        if !matches!(cmd, EditorCommand::Noop) {
+            return exec(editor, cmd, screen);
+        }
+    }
+
+    // ── Help popup ──
+    if editor.show_help {
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                editor.help_scroll += 1;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                editor.help_scroll = editor.help_scroll.saturating_sub(1);
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                editor.show_help = false;
+                editor.help_scroll = 0;
+            }
+            _ => {}
+        }
+        return false;
+    }
+
+    // ── Workspace list popup ──
+    if editor.show_workspace_list {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if editor.workspace_list_selected > 0 {
+                    editor.workspace_list_selected -= 1;
+                }
+                return false;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if editor.workspace_list_selected + 1 < editor.tabs.len() {
+                    editor.workspace_list_selected += 1;
+                }
+                return false;
+            }
+            KeyCode::Enter => {
+                editor.active_tab = editor.workspace_list_selected;
+                editor.show_workspace_list = false;
+                return false;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                editor.show_workspace_list = false;
+                return false;
+            }
+            _ => {
+                editor.show_workspace_list = false;
+            }
+        }
+    }
+
+    // ── Explorer ──
+    let ws = &editor.tabs[editor.active_tab];
+    if ws.explorer_focused && ws.explorer.is_some() {
+        let cmd = match key.code {
+            KeyCode::Char('j') | KeyCode::Down => EditorCommand::ExplorerDown,
+            KeyCode::Char('k') | KeyCode::Up => EditorCommand::ExplorerUp,
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => EditorCommand::ExplorerOpen,
+            KeyCode::Esc | KeyCode::Char('q') => EditorCommand::ToggleExplorer,
+            KeyCode::Tab => {
+                // Can't borrow immutably above then mutably here, so drop the ref.
+                editor.tabs[editor.active_tab].explorer_focused = false;
+                EditorCommand::Noop
+            }
+            _ => EditorCommand::Noop,
+        };
+        return exec(editor, cmd, screen);
+    }
+
+    // ── Search mode ──
+    if editor.search.active {
+        let cmd = match key.code {
+            KeyCode::Esc => EditorCommand::SearchCancel,
+            KeyCode::Enter => EditorCommand::SearchExecute,
+            KeyCode::Backspace => EditorCommand::SearchBackspace,
+            KeyCode::Char(c) => EditorCommand::SearchInput(c),
+            _ => EditorCommand::Noop,
+        };
+        return exec(editor, cmd, screen);
+    }
+
+    // ── Normal key dispatch ──
+    let in_terminal = editor.focused_buf().is_terminal();
+    if editor.hover_text.is_some() {
+        editor.hover_text = None;
+    }
+    let popup_showing = editor.show_help
+        || editor.tabs[editor.active_tab].show_buffer_list
+        || editor.show_workspace_list;
+
+    let custom_bindings = match editor.mode {
+        EditorMode::Normal => &editor.config.keybindings.normal,
+        EditorMode::Insert => &editor.config.keybindings.insert,
+        _ => &editor.config.keybindings.normal,
+    };
+    let (cmd, new_input_state) =
+        if let Some(custom_cmd) = lookup_custom_keybinding(editor.mode, &key, custom_bindings) {
+            (custom_cmd, InputState::Ready)
+        } else {
+            key_to_command(
+                editor.mode,
+                editor.input_state,
+                key,
+                in_terminal,
+                popup_showing,
+            )
+        };
+
+    // Count accumulation
+    if new_input_state == InputState::AccumulatingCount {
+        if let KeyCode::Char(c) = key.code {
+            if c.is_ascii_digit() {
+                editor.count_state.pending_digits.push(c);
+                editor.input_state = InputState::AccumulatingCount;
+                return false;
+            }
+        }
+    }
+
+    let cmd = if !editor.count_state.pending_digits.is_empty() {
+        let count: usize = editor.count_state.pending_digits.parse().unwrap_or(1);
+        editor.count_state.pending_digits.clear();
+        match cmd {
+            EditorCommand::MoveCursor(dir) => EditorCommand::MoveCursorN(dir, count),
+            EditorCommand::DeleteMotion(dir, _) => EditorCommand::DeleteMotion(dir, count),
+            EditorCommand::ChangeMotion(dir, _) => EditorCommand::ChangeMotion(dir, count),
+            EditorCommand::DeleteLines(_) => EditorCommand::DeleteLines(count),
+            EditorCommand::ChangeLines(_) => EditorCommand::ChangeLines(count),
+            other => other,
+        }
+    } else {
+        cmd
+    };
+
+    editor.input_state = new_input_state;
+
+    // Macro recording
+    if editor.macros.recording.is_some()
+        && !matches!(
+            cmd,
+            EditorCommand::StartMacroRecord(_)
+                | EditorCommand::StopMacroRecord
+                | EditorCommand::ReplayMacro(_)
+        )
+    {
+        editor.macros.buffer.push(key);
+    }
+
+    exec(editor, cmd, screen)
+}
+
+/// Execute a single command — returns true if the editor wants to quit.
+fn exec(editor: &mut EditorState, cmd: EditorCommand, screen: novim_types::Rect) -> bool {
+    match editor.execute(cmd, screen) {
+        Ok(ExecOutcome::Quit) => true,
+        Ok(ExecOutcome::Continue) => false,
+        Err(e) => {
+            editor.status_message = Some(e.to_string());
+            false
+        }
+    }
+}

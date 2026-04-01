@@ -69,7 +69,7 @@ pub trait Searchable {
 pub trait TerminalLike {
     fn send_key(&mut self, _key: crossterm::event::KeyEvent) {}
     fn is_terminal(&self) -> bool { false }
-    fn poll_pty(&mut self) {}
+    fn poll_pty(&mut self) -> bool { false }
     fn get_styled_cells(&self, _row: usize) -> Option<&[crate::emulator::grid::Cell]> { None }
     fn shell_cwd(&self) -> Option<std::path::PathBuf> { None }
 }

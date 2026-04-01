@@ -1,0 +1,23 @@
+[package]
+name = "novim-gui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "novim-gui"
+path = "src/main.rs"
+
+[dependencies]
+novim-core.workspace = true
+novim-types.workspace = true
+crossterm.workspace = true
+
+wgpu.workspace = true
+winit.workspace = true
+glyphon.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+log.workspace = true
+env_logger.workspace = true
