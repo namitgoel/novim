@@ -63,6 +63,7 @@ pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
+arboard = "3"
 
 # Internal crates
 novim-types = { path = "crates/novim-types" }

@@ -24,6 +24,18 @@ use crate::pane::{PaneContent, PaneManager, SplitDirection};
 use crate::session;
 use novim_types::{EditorMode, Selection};
 
+/// Copy text to the system clipboard (best-effort, silent failure).
+fn set_system_clipboard(text: &str) {
+    if let Ok(mut clip) = arboard::Clipboard::new() {
+        let _ = clip.set_text(text.to_string());
+    }
+}
+
+/// Read text from the system clipboard.
+fn get_system_clipboard() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok()
+}
+
 /// Result of executing an editor command.
 pub enum ExecOutcome {
     /// Continue the event loop.
@@ -553,7 +565,8 @@ impl EditorState {
             }
             EditorCommand::DeleteSelection => {
                 if let Some(text) = self.focused_buf_mut().delete_selection() {
-                    self.clipboard = text;
+                    self.clipboard = text.clone();
+                    set_system_clipboard(&text);
                     self.focused_buf_mut().break_undo_group();
                 }
                 self.mode = EditorMode::Normal;
@@ -561,7 +574,8 @@ impl EditorState {
             }
             EditorCommand::YankSelection => {
                 if let Some(text) = self.focused_buf().selected_text() {
-                    self.clipboard = text;
+                    self.clipboard = text.clone();
+                    set_system_clipboard(&text);
                     self.status_message = Some("Yanked".to_string());
                 }
                 self.focused_buf_mut().set_selection(None);
@@ -569,8 +583,11 @@ impl EditorState {
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::Paste => {
-                if !self.clipboard.is_empty() {
-                    let clip = self.clipboard.clone();
+                // Prefer system clipboard, fall back to internal
+                let clip = get_system_clipboard()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| self.clipboard.clone());
+                if !clip.is_empty() {
                     let buf = self.focused_buf_mut();
                     for c in clip.chars() {
                         buf.insert_char(c);
@@ -700,7 +717,8 @@ impl EditorState {
             }
             EditorCommand::DeleteLines(n) => {
                 if let Some(deleted) = self.focused_buf_mut().delete_lines(n) {
-                    self.clipboard = deleted;
+                    self.clipboard = deleted.clone();
+                    set_system_clipboard(&deleted);
                     self.focused_buf_mut().break_undo_group();
                     self.tabs[idx].notify_lsp_change();
                 }
@@ -1052,11 +1070,12 @@ impl EditorState {
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::ScrollUp => {
+                let n = self.config.editor.scroll_lines;
                 let focused_id = self.tabs[idx].panes.focused_id();
                 if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
-                    pane.viewport_offset = pane.viewport_offset.saturating_sub(10);
+                    pane.viewport_offset = pane.viewport_offset.saturating_sub(n);
                     let cursor = pane.content.as_buffer_like().cursor();
-                    if cursor.line > pane.viewport_offset + 10 {
+                    if cursor.line > pane.viewport_offset + n {
                         pane.content.as_buffer_like_mut().set_cursor_pos(
                             novim_types::Position::new(pane.viewport_offset, cursor.column),
                         );
@@ -1065,10 +1084,11 @@ impl EditorState {
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::ScrollDown => {
+                let n = self.config.editor.scroll_lines;
                 let focused_id = self.tabs[idx].panes.focused_id();
                 if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
                     let max = pane.content.as_buffer_like().len_lines().saturating_sub(1);
-                    pane.viewport_offset = (pane.viewport_offset + 10).min(max);
+                    pane.viewport_offset = (pane.viewport_offset + n).min(max);
                     let cursor = pane.content.as_buffer_like().cursor();
                     if cursor.line < pane.viewport_offset {
                         pane.content.as_buffer_like_mut().set_cursor_pos(
@@ -1155,16 +1175,18 @@ impl EditorState {
                 }
             }
             MouseEventKind::ScrollUp => {
+                let n = self.config.editor.mouse_scroll_lines;
                 let focused_id = self.tabs[idx].panes.focused_id();
                 if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
-                    pane.viewport_offset = pane.viewport_offset.saturating_sub(3);
+                    pane.viewport_offset = pane.viewport_offset.saturating_sub(n);
                 }
             }
             MouseEventKind::ScrollDown => {
+                let n = self.config.editor.mouse_scroll_lines;
                 let focused_id = self.tabs[idx].panes.focused_id();
                 if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
                     let max = pane.content.as_buffer_like().len_lines().saturating_sub(1);
-                    pane.viewport_offset = (pane.viewport_offset + 3).min(max);
+                    pane.viewport_offset = (pane.viewport_offset + n).min(max);
                 }
             }
             _ => {}

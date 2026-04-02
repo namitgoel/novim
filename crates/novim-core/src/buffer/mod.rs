@@ -272,6 +272,78 @@ impl Buffer {
         let line_start = self.rope.line_to_char(line);
         Position::new(line, char_idx - line_start)
     }
+
+    /// Classify a character: 0 = whitespace, 1 = word (alnum/_), 2 = punctuation
+    fn char_class(c: char) -> u8 {
+        if c.is_whitespace() { 0 }
+        else if c.is_alphanumeric() || c == '_' { 1 }
+        else { 2 }
+    }
+
+    /// Find position after moving forward one word (vim `w`).
+    fn find_word_forward_pos(&self) -> Position {
+        let total = self.rope.len_chars();
+        let mut idx = self.cursor_to_char_idx();
+        if idx >= total { return self.cursor; }
+
+        // Skip current word class
+        let start_class = Self::char_class(self.rope.char(idx));
+        while idx < total && Self::char_class(self.rope.char(idx)) == start_class {
+            idx += 1;
+        }
+        // Skip whitespace
+        while idx < total && self.rope.char(idx).is_whitespace() && self.rope.char(idx) != '\n' {
+            idx += 1;
+        }
+        // If we hit a newline, move past it to the next line
+        if idx < total && self.rope.char(idx) == '\n' {
+            idx += 1;
+            // Skip blank lines
+            while idx < total && self.rope.char(idx) == '\n' {
+                idx += 1;
+            }
+        }
+        if idx >= total { idx = total.saturating_sub(1); }
+        self.char_idx_to_position(idx)
+    }
+
+    /// Find position after moving backward one word (vim `b`).
+    fn find_word_backward_pos(&self) -> Position {
+        let mut idx = self.cursor_to_char_idx();
+        if idx == 0 { return self.cursor; }
+        idx -= 1;
+
+        // Skip whitespace/newlines backward
+        while idx > 0 && (self.rope.char(idx).is_whitespace()) {
+            idx -= 1;
+        }
+        // Skip current word class backward
+        let target_class = Self::char_class(self.rope.char(idx));
+        while idx > 0 && Self::char_class(self.rope.char(idx - 1)) == target_class {
+            idx -= 1;
+        }
+        self.char_idx_to_position(idx)
+    }
+
+    /// Find position at end of current/next word (vim `e`).
+    fn find_word_end_pos(&self) -> Position {
+        let total = self.rope.len_chars();
+        let mut idx = self.cursor_to_char_idx();
+        if idx >= total.saturating_sub(1) { return self.cursor; }
+        idx += 1;
+
+        // Skip whitespace
+        while idx < total && self.rope.char(idx).is_whitespace() {
+            idx += 1;
+        }
+        if idx >= total { return self.char_idx_to_position(total.saturating_sub(1)); }
+        // Advance through current word class
+        let target_class = Self::char_class(self.rope.char(idx));
+        while idx + 1 < total && Self::char_class(self.rope.char(idx + 1)) == target_class {
+            idx += 1;
+        }
+        self.char_idx_to_position(idx)
+    }
 }
 
 impl PaneDisplay for Buffer {
@@ -305,6 +377,28 @@ impl PaneDisplay for Buffer {
                     self.cursor.line = next;
                     self.clamp_cursor_column();
                 }
+            }
+            Direction::WordForward => {
+                self.cursor = self.find_word_forward_pos();
+            }
+            Direction::WordBackward => {
+                self.cursor = self.find_word_backward_pos();
+            }
+            Direction::WordEnd => {
+                self.cursor = self.find_word_end_pos();
+            }
+            Direction::LineStart => {
+                self.cursor.column = 0;
+            }
+            Direction::LineEnd => {
+                self.cursor.column = self.line_len(self.cursor.line);
+            }
+            Direction::FileStart => {
+                self.cursor = Position::zero();
+            }
+            Direction::FileEnd => {
+                self.cursor.line = self.rope.len_lines().saturating_sub(1);
+                self.clamp_cursor_column();
             }
         }
     }
@@ -701,6 +795,36 @@ impl TextEditing for Buffer {
                     if self.cursor.line > 0 {
                         self.cursor.line -= 1;
                         self.delete_lines(1);
+                    }
+                }
+                // Word/line/file motions: delete from cursor to target position
+                Direction::WordForward | Direction::WordBackward | Direction::WordEnd
+                | Direction::LineStart | Direction::LineEnd
+                | Direction::FileStart | Direction::FileEnd => {
+                    let start_idx = self.cursor_to_char_idx();
+                    self.move_cursor(dir);
+                    let end_idx = self.cursor_to_char_idx();
+                    let (from, to) = if start_idx <= end_idx {
+                        (start_idx, end_idx)
+                    } else {
+                        (end_idx, start_idx)
+                    };
+                    if from < to && to <= self.rope.len_chars() {
+                        let deleted = self.rope.slice(from..to).to_string();
+                        self.ensure_undo_group();
+                        if let Some(group) = &mut self.current_group {
+                            group.ops.push(EditOp::Delete {
+                                char_idx: from,
+                                content: deleted,
+                            });
+                        }
+                        self.redo_stack.clear();
+                        self.rope.remove(from..to);
+                        self.cursor = self.char_idx_to_position(from);
+                        self.dirty = true;
+                        self.highlights_dirty = true;
+                        self.version += 1;
+                        self.invalidate_text_cache();
                     }
                 }
             }

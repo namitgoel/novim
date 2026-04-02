@@ -68,6 +68,13 @@ pub enum Direction {
     Down,
     Left,
     Right,
+    WordForward,
+    WordBackward,
+    WordEnd,
+    LineStart,
+    LineEnd,
+    FileStart,
+    FileEnd,
 }
 
 /// A text selection (anchor = where selection started, head = where cursor is now).

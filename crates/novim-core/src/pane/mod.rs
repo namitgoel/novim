@@ -443,12 +443,14 @@ impl PaneManager {
                 Direction::Right => rect.x >= current.x + current.width,
                 Direction::Up => rect.y + rect.height <= current.y,
                 Direction::Down => rect.y >= current.y + current.height,
+                _ => false, // word/line/file motions don't apply to pane focus
             })
             .min_by_key(|(_, rect)| match direction {
                 Direction::Left => current.x.saturating_sub(rect.x + rect.width),
                 Direction::Right => rect.x.saturating_sub(current.x + current.width),
                 Direction::Up => current.y.saturating_sub(rect.y + rect.height),
                 Direction::Down => rect.y.saturating_sub(current.y + current.height),
+                _ => u16::MAX,
             });
 
         if let Some((id, _)) = candidate {

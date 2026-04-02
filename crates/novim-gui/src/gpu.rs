@@ -104,6 +104,10 @@ pub struct GpuState {
     /// Font metrics used for text buffers.
     pub font_size: f32,
     pub line_height: f32,
+
+    /// Configurable font settings.
+    pub base_font_size: f32,
+    pub font_family: String,
 }
 
 /// Background color — dark terminal style.
@@ -116,8 +120,8 @@ const BG: wgpu::Color = wgpu::Color {
 };
 
 impl GpuState {
-    /// Create GPU state for the given window.
-    pub async fn new(window: Arc<Window>) -> Self {
+    /// Create GPU state for the given window with configurable font.
+    pub async fn new(window: Arc<Window>, font_family: &str, base_font_size: f32) -> Self {
         let physical_size = window.inner_size();
         let scale_factor = window.scale_factor();
 
@@ -166,11 +170,11 @@ impl GpuState {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
 
-        // Measure monospace cell dimensions.
-        let font_size = 14.0 * scale_factor as f32;
+        // Measure monospace cell dimensions using configured font.
+        let font_size = base_font_size * scale_factor as f32;
         let line_height = (font_size * 1.4).ceil();
 
-        let (cell_width, cell_height) = measure_cell(&mut font_system, font_size, line_height);
+        let (cell_width, cell_height) = measure_cell(&mut font_system, font_size, line_height, font_family);
 
         // Background quad pipeline — draws colored rectangles behind text.
         let bg_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -244,6 +248,8 @@ impl GpuState {
             cell_height,
             font_size,
             line_height,
+            base_font_size,
+            font_family: font_family.to_string(),
         }
     }
 
@@ -260,9 +266,9 @@ impl GpuState {
         self.surface.configure(&self.device, &self.surface_config);
 
         // Recompute font metrics for new scale.
-        self.font_size = 14.0 * scale_factor as f32;
+        self.font_size = self.base_font_size * scale_factor as f32;
         self.line_height = (self.font_size * 1.4).ceil();
-        let (cw, ch) = measure_cell(&mut self.font_system, self.font_size, self.line_height);
+        let (cw, ch) = measure_cell(&mut self.font_system, self.font_size, self.line_height, &self.font_family);
         self.cell_width = cw;
         self.cell_height = ch;
     }
@@ -395,13 +401,18 @@ impl GpuState {
 }
 
 /// Measure the width and height of a single monospace cell.
-fn measure_cell(font_system: &mut FontSystem, font_size: f32, line_height: f32) -> (f32, f32) {
+fn measure_cell(font_system: &mut FontSystem, font_size: f32, line_height: f32, font_family: &str) -> (f32, f32) {
+    let family = if font_family.is_empty() || font_family == "monospace" {
+        Family::Monospace
+    } else {
+        Family::Name(font_family)
+    };
     let mut buf = TextBuffer::new(font_system, Metrics::new(font_size, line_height));
     buf.set_size(font_system, Some(font_size * 10.0), Some(line_height * 2.0));
     buf.set_text(
         font_system,
         "M",
-        &Attrs::new().family(Family::Monospace),
+        &Attrs::new().family(family),
         Shaping::Basic,
         None,
     );

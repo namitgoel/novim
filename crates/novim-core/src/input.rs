@@ -303,6 +303,7 @@ pub fn key_to_command(
 
     if input_state == InputState::WaitingGCommand {
         return match key.code {
+            KeyCode::Char('g') => (EditorCommand::MoveCursor(Direction::FileStart), InputState::Ready),
             KeyCode::Char('d') => (EditorCommand::GotoDefinition, InputState::Ready),
             KeyCode::Char('t') => (EditorCommand::NextTab, InputState::Ready),
             KeyCode::Char('T') => (EditorCommand::PrevTab, InputState::Ready),
@@ -487,6 +488,13 @@ fn normal_mode_command(key: KeyEvent) -> (EditorCommand, InputState) {
             EditorCommand::MoveCursor(Direction::Right),
             InputState::Ready,
         ),
+        // Word/line/file motions
+        KeyCode::Char('w') => (EditorCommand::MoveCursor(Direction::WordForward), InputState::Ready),
+        KeyCode::Char('b') => (EditorCommand::MoveCursor(Direction::WordBackward), InputState::Ready),
+        KeyCode::Char('e') => (EditorCommand::MoveCursor(Direction::WordEnd), InputState::Ready),
+        KeyCode::Char('0') => (EditorCommand::MoveCursor(Direction::LineStart), InputState::Ready),
+        KeyCode::Char('$') => (EditorCommand::MoveCursor(Direction::LineEnd), InputState::Ready),
+        KeyCode::Char('G') => (EditorCommand::MoveCursor(Direction::FileEnd), InputState::Ready),
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             (EditorCommand::Save, InputState::Ready)
         }
@@ -536,6 +544,27 @@ fn operator_motion_command(key: KeyEvent, op: Operator) -> EditorCommand {
             Operator::Delete => EditorCommand::DeleteMotion(Direction::Right, 1),
             Operator::Change => EditorCommand::ChangeMotion(Direction::Right, 1),
         },
+        // Word/line/file motions
+        KeyCode::Char('w') => match op {
+            Operator::Delete => EditorCommand::DeleteMotion(Direction::WordForward, 1),
+            Operator::Change => EditorCommand::ChangeMotion(Direction::WordForward, 1),
+        },
+        KeyCode::Char('b') => match op {
+            Operator::Delete => EditorCommand::DeleteMotion(Direction::WordBackward, 1),
+            Operator::Change => EditorCommand::ChangeMotion(Direction::WordBackward, 1),
+        },
+        KeyCode::Char('e') => match op {
+            Operator::Delete => EditorCommand::DeleteMotion(Direction::WordEnd, 1),
+            Operator::Change => EditorCommand::ChangeMotion(Direction::WordEnd, 1),
+        },
+        KeyCode::Char('0') => match op {
+            Operator::Delete => EditorCommand::DeleteMotion(Direction::LineStart, 1),
+            Operator::Change => EditorCommand::ChangeMotion(Direction::LineStart, 1),
+        },
+        KeyCode::Char('$') => match op {
+            Operator::Delete => EditorCommand::DeleteMotion(Direction::LineEnd, 1),
+            Operator::Change => EditorCommand::ChangeMotion(Direction::LineEnd, 1),
+        },
         // dd = delete line, cc = change line
         KeyCode::Char('d') if op == Operator::Delete => EditorCommand::DeleteLines(1),
         KeyCode::Char('c') if op == Operator::Change => EditorCommand::ChangeLines(1),
@@ -552,6 +581,13 @@ fn visual_mode_command(key: KeyEvent) -> EditorCommand {
         KeyCode::Char('j') | KeyCode::Down => EditorCommand::MoveCursor(Direction::Down),
         KeyCode::Char('k') | KeyCode::Up => EditorCommand::MoveCursor(Direction::Up),
         KeyCode::Char('l') | KeyCode::Right => EditorCommand::MoveCursor(Direction::Right),
+        // Word/line/file motions extend selection
+        KeyCode::Char('w') => EditorCommand::MoveCursor(Direction::WordForward),
+        KeyCode::Char('b') => EditorCommand::MoveCursor(Direction::WordBackward),
+        KeyCode::Char('e') => EditorCommand::MoveCursor(Direction::WordEnd),
+        KeyCode::Char('0') => EditorCommand::MoveCursor(Direction::LineStart),
+        KeyCode::Char('$') => EditorCommand::MoveCursor(Direction::LineEnd),
+        KeyCode::Char('G') => EditorCommand::MoveCursor(Direction::FileEnd),
         // Actions on selection
         KeyCode::Char('d') | KeyCode::Char('x') => EditorCommand::DeleteSelection,
         KeyCode::Char('y') => EditorCommand::YankSelection,

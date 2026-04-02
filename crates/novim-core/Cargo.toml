@@ -41,6 +41,9 @@ lsp-types = { workspace = true }
 # Logging
 log = { workspace = true }
 
+# System clipboard
+arboard = { workspace = true }
+
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }

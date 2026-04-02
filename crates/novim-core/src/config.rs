@@ -15,6 +15,26 @@ pub struct NovimConfig {
     pub terminal: TerminalConfig,
     pub lsp: LspConfig,
     pub keybindings: KeybindingsConfig,
+    pub gui: GuiConfig,
+}
+
+/// GUI-specific configuration (font, window settings).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuiConfig {
+    /// Font family name (e.g., "JetBrains Mono", "Fira Code", "monospace")
+    pub font_family: String,
+    /// Base font size in points (scaled by DPI)
+    pub font_size: f32,
+}
+
+impl Default for GuiConfig {
+    fn default() -> Self {
+        Self {
+            font_family: "monospace".to_string(),
+            font_size: 14.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +56,10 @@ pub struct EditorConfig {
     pub finder_preview: bool,
     /// Enable word wrapping
     pub word_wrap: bool,
+    /// Lines to scroll with Ctrl+U/D
+    pub scroll_lines: usize,
+    /// Lines to scroll per mouse wheel tick
+    pub mouse_scroll_lines: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +174,8 @@ impl Default for EditorConfig {
             scroll_offset: 3,
             finder_preview: true,
             word_wrap: false,
+            scroll_lines: 10,
+            mouse_scroll_lines: 3,
         }
     }
 }

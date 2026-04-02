@@ -99,7 +99,12 @@ impl winit::application::ApplicationHandler<UserEvent> for Application {
                 .expect("Failed to create window"),
         );
 
-        let mut gpu = pollster::block_on(GpuState::new(window.clone()));
+        let cfg = novim_core::config::load_config();
+        let mut gpu = pollster::block_on(GpuState::new(
+            window.clone(),
+            &cfg.gui.font_family,
+            cfg.gui.font_size,
+        ));
 
         let mut editor = if let Some(ref path) = self.file_arg {
             let p = std::path::Path::new(path);
@@ -335,8 +340,20 @@ fn handle_key(
             KeyCode::Char(':') => Some(EditorCommand::SwitchMode(EditorMode::Command)),
             KeyCode::Char('/') => Some(EditorCommand::EnterSearch),
             KeyCode::Char('?') => Some(EditorCommand::ToggleHelp),
+            KeyCode::Char('c') => Some(EditorCommand::YankSelection),
+            KeyCode::Char('v') => Some(EditorCommand::Paste),
             KeyCode::Char('s') => Some(EditorCommand::Save),
             KeyCode::Char('q') => Some(EditorCommand::Quit),
+            // Cmd+1-9: jump to tab
+            KeyCode::Char('1') => Some(EditorCommand::JumpToTab(0)),
+            KeyCode::Char('2') => Some(EditorCommand::JumpToTab(1)),
+            KeyCode::Char('3') => Some(EditorCommand::JumpToTab(2)),
+            KeyCode::Char('4') => Some(EditorCommand::JumpToTab(3)),
+            KeyCode::Char('5') => Some(EditorCommand::JumpToTab(4)),
+            KeyCode::Char('6') => Some(EditorCommand::JumpToTab(5)),
+            KeyCode::Char('7') => Some(EditorCommand::JumpToTab(6)),
+            KeyCode::Char('8') => Some(EditorCommand::JumpToTab(7)),
+            KeyCode::Char('9') => Some(EditorCommand::JumpToTab(8)),
             _ => None,
         };
         if let Some(cmd) = cmd {

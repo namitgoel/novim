@@ -278,6 +278,10 @@ impl PaneDisplay for TerminalPane {
             Direction::Down => self.write_to_pty(b"\x1b[B"),
             Direction::Right => self.write_to_pty(b"\x1b[C"),
             Direction::Left => self.write_to_pty(b"\x1b[D"),
+            // Word/line/file motions are editor-only, no-op for terminals
+            Direction::WordForward | Direction::WordBackward | Direction::WordEnd
+            | Direction::LineStart | Direction::LineEnd
+            | Direction::FileStart | Direction::FileEnd => {}
         }
     }
 
