@@ -497,6 +497,30 @@ impl EditorState {
         ))
     }
 
+    /// Check if any open files have been modified externally.
+    /// Auto-reloads clean buffers; warns for dirty ones.
+    pub fn check_external_changes(&mut self) {
+        for ws in &mut self.tabs {
+            ws.panes.for_each_pane_mut(|pane| {
+                if let PaneContent::Editor(buf) = &mut pane.content {
+                    if let (Some(path), Some(last_mod)) = (buf.file_path_str().map(|s| s.to_string()), buf.last_modified) {
+                        if let Ok(meta) = std::fs::metadata(&path) {
+                            if let Ok(current_mod) = meta.modified() {
+                                if current_mod > last_mod {
+                                    if !crate::buffer::PaneDisplay::is_dirty(buf) {
+                                        buf.reload_from_file();
+                                    }
+                                    // Update mtime even for dirty buffers to avoid repeated warnings
+                                    buf.last_modified = Some(current_mod);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
+
     /// Execute a command. Returns Ok(Quit) to exit, Ok(Continue) to keep going,
     /// or Err with structured error information.
     pub fn execute(
@@ -1128,6 +1152,32 @@ impl EditorState {
             }
             EditorCommand::SetOption(opt) => self.handle_set_option(&opt),
             EditorCommand::ForceRedraw => Ok(ExecOutcome::Continue),
+            EditorCommand::DeleteTextObject(modifier, kind) | EditorCommand::ChangeTextObject(modifier, kind) => {
+                let is_change = matches!(cmd, EditorCommand::ChangeTextObject(..));
+                let range = {
+                    let buf = self.focused_buf_mut();
+                    use crate::input::{TextObjectModifier, TextObjectKind};
+                    match (modifier, kind) {
+                        (TextObjectModifier::Inner, TextObjectKind::Word) => buf.find_inner_word(),
+                        (TextObjectModifier::Around, TextObjectKind::Word) => buf.find_around_word(),
+                        (TextObjectModifier::Inner, TextObjectKind::Quote(q)) => buf.find_inner_quote(q),
+                        (TextObjectModifier::Around, TextObjectKind::Quote(q)) => buf.find_around_quote(q),
+                        (TextObjectModifier::Inner, TextObjectKind::Bracket(o, c)) => buf.find_inner_bracket(o, c),
+                        (TextObjectModifier::Around, TextObjectKind::Bracket(o, c)) => buf.find_around_bracket(o, c),
+                    }
+                };
+                if let Some((start, end)) = range {
+                    if let Some(deleted) = self.focused_buf_mut().delete_text_range(start, end) {
+                        self.clipboard = deleted.clone();
+                        set_system_clipboard(&deleted);
+                        self.focused_buf_mut().break_undo_group();
+                    }
+                    if is_change {
+                        self.mode = EditorMode::Insert;
+                    }
+                }
+                Ok(ExecOutcome::Continue)
+            }
             EditorCommand::Noop => Ok(ExecOutcome::Continue),
         }
     }

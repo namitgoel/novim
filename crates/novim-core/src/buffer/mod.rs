@@ -37,6 +37,7 @@ pub trait PaneDisplay {
     fn fold_all(&mut self) {}
     fn unfold_all(&mut self) {}
     fn recompute_folds(&mut self, _tab_width: usize) {}
+    fn git_sign(&self, _line: usize) -> Option<crate::git::GitSign> { None }
 }
 
 /// Text editing operations (insert, delete, undo/redo, save).
@@ -56,6 +57,14 @@ pub trait TextEditing {
     fn save(&mut self) -> std::result::Result<String, NovimError> {
         Err(NovimError::Buffer("Not supported".to_string()))
     }
+    // Text object operations
+    fn find_inner_word(&self) -> Option<(usize, usize)> { None }
+    fn find_around_word(&self) -> Option<(usize, usize)> { None }
+    fn find_inner_quote(&self, _quote: char) -> Option<(usize, usize)> { None }
+    fn find_around_quote(&self, _quote: char) -> Option<(usize, usize)> { None }
+    fn find_inner_bracket(&self, _open: char, _close: char) -> Option<(usize, usize)> { None }
+    fn find_around_bracket(&self, _open: char, _close: char) -> Option<(usize, usize)> { None }
+    fn delete_text_range(&mut self, _start: usize, _end: usize) -> Option<String> { None }
 }
 
 /// Search and replace operations.
@@ -116,6 +125,10 @@ pub struct Buffer {
     folds: FoldState,
     /// Document version counter for LSP (incremented on every edit)
     version: i32,
+    /// Git gutter signs (line → sign)
+    pub git_signs: std::collections::HashMap<usize, crate::git::GitSign>,
+    /// Last known file modification time (for auto-reload detection)
+    pub last_modified: Option<std::time::SystemTime>,
 }
 
 impl Buffer {
@@ -137,6 +150,8 @@ impl Buffer {
             folds: FoldState::new(),
             cached_text: None,
             version: 0,
+            git_signs: std::collections::HashMap::new(),
+            last_modified: None,
         }
     }
 
@@ -154,6 +169,10 @@ impl Buffer {
             Err(e) => return Err(e),
         };
 
+        let git_signs = crate::git::diff_signs(&path_buf);
+        let last_modified = fs::metadata(&path_buf).ok()
+            .and_then(|m| m.modified().ok());
+
         Ok(Self {
             rope,
             cursor: Position::zero(),
@@ -170,11 +189,38 @@ impl Buffer {
             folds: FoldState::new(),
             cached_text: None,
             version: 0,
+            git_signs,
+            last_modified,
         })
     }
 
     pub fn file_path_str(&self) -> Option<&str> {
         self.file_path.as_deref().and_then(|p| p.to_str())
+    }
+
+    /// Reload the buffer content from disk (for auto-reload).
+    pub fn reload_from_file(&mut self) -> bool {
+        let path = match &self.file_path {
+            Some(p) => p.clone(),
+            None => return false,
+        };
+        match fs::read_to_string(&path) {
+            Ok(content) => {
+                self.rope = Rope::from_str(&content);
+                self.cursor = Position::zero();
+                self.undo_stack.clear();
+                self.redo_stack.clear();
+                self.current_group = None;
+                self.dirty = false;
+                self.highlights_dirty = true;
+                self.cached_text = None;
+                self.version += 1;
+                self.last_modified = fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+                self.git_signs = crate::git::diff_signs(&path);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Get the full document text (for LSP didOpen/didChange).
@@ -343,6 +389,134 @@ impl Buffer {
             idx += 1;
         }
         self.char_idx_to_position(idx)
+    }
+
+    /// Find inner word text object range (char indices).
+    pub fn find_inner_word(&self) -> Option<(usize, usize)> {
+        let total = self.rope.len_chars();
+        if total == 0 { return None; }
+        let idx = self.cursor_to_char_idx().min(total - 1);
+        let cls = Self::char_class(self.rope.char(idx));
+        if cls == 0 { return None; } // cursor on whitespace
+
+        let mut start = idx;
+        while start > 0 && Self::char_class(self.rope.char(start - 1)) == cls {
+            start -= 1;
+        }
+        let mut end = idx;
+        while end + 1 < total && Self::char_class(self.rope.char(end + 1)) == cls {
+            end += 1;
+        }
+        Some((start, end + 1))
+    }
+
+    /// Find around word text object range (word + surrounding whitespace).
+    pub fn find_around_word(&self) -> Option<(usize, usize)> {
+        let (start, end) = self.find_inner_word()?;
+        let total = self.rope.len_chars();
+        let mut aend = end;
+        while aend < total && self.rope.char(aend).is_whitespace() && self.rope.char(aend) != '\n' {
+            aend += 1;
+        }
+        if aend == end {
+            // No trailing whitespace, try leading
+            let mut astart = start;
+            while astart > 0 && self.rope.char(astart - 1).is_whitespace() && self.rope.char(astart - 1) != '\n' {
+                astart -= 1;
+            }
+            Some((astart, end))
+        } else {
+            Some((start, aend))
+        }
+    }
+
+    /// Find inner quote text object range (between quotes on current line).
+    pub fn find_inner_quote(&self, quote: char) -> Option<(usize, usize)> {
+        let line = self.rope.line(self.cursor.line);
+        let line_start = self.rope.line_to_char(self.cursor.line);
+        let line_str: String = line.chars().collect();
+        // Find the quote pair surrounding the cursor column
+        let col = self.cursor.column;
+        let mut first = None;
+        for (i, c) in line_str.chars().enumerate() {
+            if c == quote {
+                if first.is_none() {
+                    first = Some(i);
+                } else {
+                    if col >= first.unwrap() && col <= i {
+                        return Some((line_start + first.unwrap() + 1, line_start + i));
+                    }
+                    first = Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    /// Find around quote text object range (including the quotes).
+    pub fn find_around_quote(&self, quote: char) -> Option<(usize, usize)> {
+        let (start, end) = self.find_inner_quote(quote)?;
+        Some((start - 1, end + 1))
+    }
+
+    /// Find inner bracket text object range (between matching brackets).
+    pub fn find_inner_bracket(&self, open: char, close: char) -> Option<(usize, usize)> {
+        let total = self.rope.len_chars();
+        let cursor_idx = self.cursor_to_char_idx();
+
+        // Search backward for opening bracket
+        let mut depth = 0i32;
+        let mut open_idx = None;
+        let mut i = cursor_idx;
+        loop {
+            let c = self.rope.char(i);
+            if c == close { depth += 1; }
+            if c == open {
+                if depth == 0 { open_idx = Some(i); break; }
+                depth -= 1;
+            }
+            if i == 0 { break; }
+            i -= 1;
+        }
+        let open_idx = open_idx?;
+
+        // Search forward for closing bracket
+        depth = 0;
+        let mut close_idx = None;
+        for j in (open_idx + 1)..total {
+            let c = self.rope.char(j);
+            if c == open { depth += 1; }
+            if c == close {
+                if depth == 0 { close_idx = Some(j); break; }
+                depth -= 1;
+            }
+        }
+        let close_idx = close_idx?;
+        Some((open_idx + 1, close_idx))
+    }
+
+    /// Find around bracket text object range (including the brackets).
+    pub fn find_around_bracket(&self, open: char, close: char) -> Option<(usize, usize)> {
+        let (start, end) = self.find_inner_bracket(open, close)?;
+        Some((start - 1, end + 1))
+    }
+
+    /// Delete a text object range and return the deleted text.
+    pub fn delete_text_range(&mut self, start: usize, end: usize) -> Option<String> {
+        if start >= end || end > self.rope.len_chars() { return None; }
+        let deleted = self.rope.slice(start..end).to_string();
+        self.ensure_undo_group();
+        if let Some(group) = &mut self.current_group {
+            group.ops.push(EditOp::Delete { char_idx: start, content: deleted.clone() });
+        }
+        self.redo_stack.clear();
+        self.rope.remove(start..end);
+        self.cursor = self.char_idx_to_position(start);
+        self.dirty = true;
+        self.highlights_dirty = true;
+        self.version += 1;
+        self.invalidate_text_cache();
+        Some(deleted)
     }
 }
 
@@ -520,6 +694,10 @@ impl PaneDisplay for Buffer {
             .map(|i| self.get_line(i).unwrap_or_default())
             .collect();
         self.folds = FoldState::detect_indent_folds(&lines, tab_width);
+    }
+
+    fn git_sign(&self, line: usize) -> Option<crate::git::GitSign> {
+        self.git_signs.get(&line).copied()
     }
 }
 
@@ -856,6 +1034,15 @@ impl TextEditing for Buffer {
 
         Some(deleted)
     }
+
+    // Text object operations (delegate to impl Buffer methods)
+    fn find_inner_word(&self) -> Option<(usize, usize)> { Buffer::find_inner_word(self) }
+    fn find_around_word(&self) -> Option<(usize, usize)> { Buffer::find_around_word(self) }
+    fn find_inner_quote(&self, quote: char) -> Option<(usize, usize)> { Buffer::find_inner_quote(self, quote) }
+    fn find_around_quote(&self, quote: char) -> Option<(usize, usize)> { Buffer::find_around_quote(self, quote) }
+    fn find_inner_bracket(&self, open: char, close: char) -> Option<(usize, usize)> { Buffer::find_inner_bracket(self, open, close) }
+    fn find_around_bracket(&self, open: char, close: char) -> Option<(usize, usize)> { Buffer::find_around_bracket(self, open, close) }
+    fn delete_text_range(&mut self, start: usize, end: usize) -> Option<String> { Buffer::delete_text_range(self, start, end) }
 }
 
 impl Searchable for Buffer {

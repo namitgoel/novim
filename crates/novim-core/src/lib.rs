@@ -18,6 +18,8 @@ pub mod lsp;
 pub mod error;
 pub mod fold;
 pub mod input;
+pub mod git;
 pub mod pane;
 pub mod session;
+pub mod url;
 pub mod welcome;

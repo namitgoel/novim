@@ -232,6 +232,10 @@ pub enum EditorCommand {
     ToggleHelp,
     /// Dismiss popup (Esc/q when popup is showing)
     DismissPopup,
+    /// Delete a text object (e.g., diw, di", da()
+    DeleteTextObject(TextObjectModifier, TextObjectKind),
+    /// Change a text object (e.g., ciw, ci", ca()
+    ChangeTextObject(TextObjectModifier, TextObjectKind),
     Noop,
 }
 
@@ -247,6 +251,8 @@ pub enum InputState {
     AccumulatingCount,
     /// Waiting for motion after operator (d, c)
     WaitingOperatorMotion(Operator),
+    /// Waiting for text object kind after operator + i/a (e.g., d→i→?)
+    WaitingTextObject(Operator, TextObjectModifier),
     /// Waiting for register name after 'q' (start recording)
     WaitingMacroRegister,
     /// Waiting for register name after '@' (replay)
@@ -258,6 +264,21 @@ pub enum InputState {
 pub enum Operator {
     Delete,
     Change,
+}
+
+/// Text object modifier: inner (i) vs around (a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextObjectModifier {
+    Inner,
+    Around,
+}
+
+/// Text object kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextObjectKind {
+    Word,
+    Bracket(char, char), // (open, close)
+    Quote(char),
 }
 
 /// Mutable state for count + operator tracking.
@@ -353,7 +374,39 @@ pub fn key_to_command(
 
     // Handle operator-pending mode (d/c + motion)
     if let InputState::WaitingOperatorMotion(op) = input_state {
+        // 'i'/'a' enter text object selection
+        if key.code == KeyCode::Char('i') {
+            return (EditorCommand::Noop, InputState::WaitingTextObject(op, TextObjectModifier::Inner));
+        }
+        if key.code == KeyCode::Char('a') {
+            return (EditorCommand::Noop, InputState::WaitingTextObject(op, TextObjectModifier::Around));
+        }
         return (operator_motion_command(key, op), InputState::Ready);
+    }
+
+    // Handle text object kind selection (di?, ci?, da?, ca?)
+    if let InputState::WaitingTextObject(op, modifier) = input_state {
+        let kind = match key.code {
+            KeyCode::Char('w') => Some(TextObjectKind::Word),
+            KeyCode::Char('"') => Some(TextObjectKind::Quote('"')),
+            KeyCode::Char('\'') => Some(TextObjectKind::Quote('\'')),
+            KeyCode::Char('`') => Some(TextObjectKind::Quote('`')),
+            KeyCode::Char('(') | KeyCode::Char(')') | KeyCode::Char('b') => Some(TextObjectKind::Bracket('(', ')')),
+            KeyCode::Char('{') | KeyCode::Char('}') | KeyCode::Char('B') => Some(TextObjectKind::Bracket('{', '}')),
+            KeyCode::Char('[') | KeyCode::Char(']') => Some(TextObjectKind::Bracket('[', ']')),
+            KeyCode::Char('<') | KeyCode::Char('>') => Some(TextObjectKind::Bracket('<', '>')),
+            _ => None,
+        };
+        return match kind {
+            Some(k) => {
+                let cmd = match op {
+                    Operator::Delete => EditorCommand::DeleteTextObject(modifier, k),
+                    Operator::Change => EditorCommand::ChangeTextObject(modifier, k),
+                };
+                (cmd, InputState::Ready)
+            }
+            None => (EditorCommand::Noop, InputState::Ready),
+        };
     }
 
     // Handle macro register selection

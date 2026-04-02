@@ -343,6 +343,17 @@ impl PaneManager {
         self.root.get_pane_mut(id)
     }
 
+    /// Call a function on every pane (mutable).
+    pub fn for_each_pane_mut<F: FnMut(&mut Pane)>(&mut self, mut f: F) {
+        let mut ids = Vec::new();
+        self.root.collect_ids(&mut ids);
+        for id in ids {
+            if let Some(pane) = self.get_pane_mut(id) {
+                f(pane);
+            }
+        }
+    }
+
     pub fn layout(&self, area: Rect) -> Vec<(PaneId, Rect)> {
         let mut result = Vec::new();
         self.root.layout(area, &mut result);

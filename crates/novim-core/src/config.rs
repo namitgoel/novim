@@ -65,16 +65,44 @@ pub struct EditorConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThemeConfig {
-    /// Border color for focused pane: "cyan", "green", "yellow", etc.
+    // ── Pane borders ──
     pub focused_border: String,
-    /// Border color for unfocused panes
     pub unfocused_border: String,
-    /// Status bar background
-    pub status_bar_bg: String,
-    /// Line number color
+    // ── General ──
+    pub foreground: String,
+    pub background: String,
+    // ── Cursor ──
+    pub cursor_bg: String,
+    pub cursor_fg: String,
+    // ── Selection & search ──
+    pub selection_bg: String,
+    pub search_match: String,
+    // ── Gutter ──
     pub line_number: String,
-    /// Current line number color
     pub current_line_number: String,
+    pub tilde: String,
+    // ── Status bar ──
+    pub status_bar_bg: String,
+    pub mode_normal: String,
+    pub mode_insert: String,
+    pub mode_visual: String,
+    pub mode_command: String,
+    // ── Explorer ──
+    pub explorer_dir: String,
+    // ── Diagnostics ──
+    pub diag_error: String,
+    pub diag_warning: String,
+    // ── Tabs ──
+    pub tab_active_bg: String,
+    pub tab_inactive_bg: String,
+    // ── Popups ──
+    pub popup_bg: String,
+    pub popup_border: String,
+    pub popup_selected_bg: String,
+    // ── Git gutter ──
+    pub git_added: String,
+    pub git_modified: String,
+    pub git_deleted: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,9 +213,31 @@ impl Default for ThemeConfig {
         Self {
             focused_border: "cyan".to_string(),
             unfocused_border: "darkgray".to_string(),
-            status_bar_bg: "darkgray".to_string(),
+            foreground: "#dcdcdc".to_string(),
+            background: "#1e1e1e".to_string(),
+            cursor_bg: "#c8c8c8".to_string(),
+            cursor_fg: "#1e1e1e".to_string(),
+            selection_bg: "#3c5078".to_string(),
+            search_match: "#645028".to_string(),
             line_number: "darkgray".to_string(),
             current_line_number: "yellow".to_string(),
+            tilde: "#4169e1".to_string(),
+            status_bar_bg: "darkgray".to_string(),
+            mode_normal: "#61afef".to_string(),
+            mode_insert: "#98c379".to_string(),
+            mode_visual: "#e5c07b".to_string(),
+            mode_command: "#e5c07b".to_string(),
+            explorer_dir: "#61afef".to_string(),
+            diag_error: "#e06c75".to_string(),
+            diag_warning: "#e5c07b".to_string(),
+            tab_active_bg: "#505064".to_string(),
+            tab_inactive_bg: "#28282e".to_string(),
+            popup_bg: "#2d2d37".to_string(),
+            popup_border: "#50b4e6".to_string(),
+            popup_selected_bg: "#46465a".to_string(),
+            git_added: "#98c379".to_string(),
+            git_modified: "#e5c07b".to_string(),
+            git_deleted: "#e06c75".to_string(),
         }
     }
 }

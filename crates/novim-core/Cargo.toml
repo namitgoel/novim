@@ -44,6 +44,9 @@ log = { workspace = true }
 # System clipboard
 arboard = { workspace = true }
 
+# Git integration
+git2 = { workspace = true }
+
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }

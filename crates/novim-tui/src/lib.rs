@@ -93,6 +93,9 @@ impl TerminalManager {
             // Process LSP events for the active workspace (updates EditorState fields)
             self.state.poll_active_lsp();
 
+            // Check for external file changes (auto-reload)
+            self.state.check_external_changes();
+
             // Reparse syntax highlights only for the active workspace
             self.state.focused_buf_mut().reparse_highlights();
 
