@@ -102,7 +102,7 @@ fn run_attach(name: &str) -> io::Result<()> {
 /// List saved sessions.
 fn run_list() -> io::Result<()> {
     let sessions = session::list_sessions().map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, e.to_string())
+        io::Error::other(e.to_string())
     })?;
 
     if sessions.is_empty() {

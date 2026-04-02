@@ -80,13 +80,13 @@ impl FoldState {
         // Fall back: find the innermost fold containing this line
         let mut best: Option<usize> = None;
         for (i, region) in self.regions.iter().enumerate() {
-            if line >= region.start_line && line <= region.end_line {
-                if best.map_or(true, |b| {
+            if line >= region.start_line && line <= region.end_line
+                && best.is_none_or(|b| {
                     let prev = &self.regions[b];
                     (region.end_line - region.start_line) < (prev.end_line - prev.start_line)
-                }) {
-                    best = Some(i);
-                }
+                })
+            {
+                best = Some(i);
             }
         }
         if let Some(i) = best {

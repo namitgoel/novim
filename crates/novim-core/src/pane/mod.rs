@@ -19,6 +19,7 @@ pub enum SplitDirection {
 }
 
 /// What a pane contains — either a text editor or a terminal.
+#[allow(clippy::large_enum_variant)]
 pub enum PaneContent {
     Editor(Buffer),
     Terminal(TerminalPane),
@@ -67,6 +68,7 @@ impl Pane {
 }
 
 /// BSP tree node
+#[allow(clippy::large_enum_variant)]
 pub enum PaneNode {
     Leaf(Pane),
     Split {
@@ -114,6 +116,7 @@ impl PaneNode {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn split_pane(
         &mut self,
         target_id: PaneId,
@@ -233,6 +236,17 @@ impl PaneNode {
         }
     }
 
+    /// Return the shell CWD from the first terminal pane found in the tree.
+    fn find_terminal_shell_cwd(&self) -> Option<std::path::PathBuf> {
+        match self {
+            PaneNode::Leaf(pane) => pane.content.as_buffer_like().shell_cwd(),
+            PaneNode::Split { first, second, .. } => {
+                first.find_terminal_shell_cwd()
+                    .or_else(|| second.find_terminal_shell_cwd())
+            }
+        }
+    }
+
     /// Resize all terminal panes to the given dimensions.
     fn resize_terminals(&mut self, rows: u16, cols: u16) {
         match self {
@@ -345,6 +359,18 @@ impl PaneManager {
         }
     }
 
+    /// Split focused pane, new pane gets the given buffer and receives focus.
+    pub fn split_with_buffer(&mut self, direction: SplitDirection, buffer: Buffer) -> PaneId {
+        let new_id = self.next_id;
+        self.next_id += 1;
+        let new_pane = Pane::new_editor(new_id, buffer);
+        if self.root.split_pane(self.focused_id, direction, new_pane).is_ok() {
+            self.count += 1;
+        }
+        self.focused_id = new_id;
+        new_id
+    }
+
     /// Split focused pane, new pane gets a terminal.
     pub fn split_terminal(
         &mut self,
@@ -450,6 +476,13 @@ impl PaneManager {
     /// Resize all terminal panes to the given dimensions.
     pub fn resize_terminals(&mut self, rows: u16, cols: u16) {
         self.root.resize_terminals(rows, cols);
+    }
+
+    /// Get the shell CWD from any terminal pane (focused first, then any).
+    pub fn any_terminal_shell_cwd(&self) -> Option<std::path::PathBuf> {
+        // Try focused pane first
+        self.focused_pane().content.as_buffer_like().shell_cwd()
+            .or_else(|| self.root.find_terminal_shell_cwd())
     }
 
     /// Visit the pane tree, calling the visitor on each leaf to build a layout.

@@ -101,14 +101,24 @@ impl winit::application::ApplicationHandler<UserEvent> for Application {
 
         let mut gpu = pollster::block_on(GpuState::new(window.clone()));
 
-        let editor = if let Some(ref path) = self.file_arg {
-            EditorState::with_file(path).unwrap_or_else(|_| EditorState::new_editor())
+        let mut editor = if let Some(ref path) = self.file_arg {
+            match EditorState::with_file(path) {
+                Ok(e) => e,
+                Err(e) => {
+                    let mut ed = EditorState::new_editor();
+                    ed.status_message = Some(format!("Failed to open {}: {}", path, e));
+                    ed
+                }
+            }
         } else {
             let rows = gpu.grid_rows();
             let cols = gpu.grid_cols();
             EditorState::new_terminal(rows, cols)
                 .unwrap_or_else(|_| EditorState::new_editor())
         };
+        // Compute initial folds for opened file.
+        let tw = editor.config.editor.tab_width;
+        editor.focused_buf_mut().recompute_folds(tw);
 
         let cached_text_buffer = glyphon::Buffer::new(
             &mut gpu.font_system,
@@ -160,11 +170,11 @@ impl winit::application::ApplicationHandler<UserEvent> for Application {
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(key_event) =
+                if let Some((key_event, is_super)) =
                     input::translate_key(&event.logical_key, event.state, state.modifiers)
                 {
                     let screen = screen_rect(state);
-                    if handle_key(&mut state.editor, key_event, screen) {
+                    if handle_key(&mut state.editor, key_event, screen, is_super) {
                         event_loop.exit();
                         return;
                     }
@@ -286,12 +296,40 @@ fn screen_rect(state: &WindowState) -> novim_types::Rect {
 }
 
 /// Process a keyboard event through the editor, mirroring the TUI's dispatch.
+/// `is_super` is true when the macOS Cmd key was held — these shortcuts always
+/// bypass terminal forwarding so they work as app-level commands.
 /// Returns true if the editor wants to quit.
 fn handle_key(
     editor: &mut EditorState,
     key: crossterm::event::KeyEvent,
     screen: novim_types::Rect,
+    is_super: bool,
 ) -> bool {
+    // ── Cmd (Super) shortcuts — always work, even in terminal panes ──
+    // On macOS Cmd+key are "app-level" shortcuts, never forwarded to the PTY.
+    if is_super {
+        let cmd = match key.code {
+            KeyCode::Char('p') | KeyCode::Char('f') => Some(EditorCommand::OpenFileFinder),
+            KeyCode::Char('e') => Some(EditorCommand::ToggleExplorer),
+            KeyCode::Char('b') => Some(EditorCommand::BufferList),
+            KeyCode::Char('t') => Some(EditorCommand::OpenTerminal),
+            KeyCode::Char('n') => Some(EditorCommand::NextTab),
+            KeyCode::Char('w') => {
+                editor.input_state = InputState::WaitingPaneCommand;
+                editor.status_message = Some("Ctrl+W...".to_string());
+                return false;
+            }
+            KeyCode::Char(':') => Some(EditorCommand::SwitchMode(EditorMode::Command)),
+            KeyCode::Char('/') => Some(EditorCommand::EnterSearch),
+            KeyCode::Char('?') => Some(EditorCommand::ToggleHelp),
+            KeyCode::Char('s') => Some(EditorCommand::Save),
+            KeyCode::Char('q') => Some(EditorCommand::Quit),
+            _ => None,
+        };
+        if let Some(cmd) = cmd {
+            return exec(editor, cmd, screen);
+        }
+    }
     // Esc always resets any stuck intermediate input state.
     if key.code == KeyCode::Esc
         && editor.input_state != InputState::Ready
@@ -428,7 +466,7 @@ fn handle_key(
         _ => &editor.config.keybindings.normal,
     };
     let (cmd, new_input_state) =
-        if let Some(custom_cmd) = lookup_custom_keybinding(editor.mode, &key, custom_bindings) {
+        if let Some(custom_cmd) = lookup_custom_keybinding(&key, custom_bindings) {
             (custom_cmd, InputState::Ready)
         } else {
             key_to_command(

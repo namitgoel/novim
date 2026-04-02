@@ -11,6 +11,9 @@ use crate::buffer::Buffer;
 use crate::error::{NovimError, Result};
 use crate::pane::{Pane, PaneId, PaneManager, PaneNode, SplitDirection};
 
+/// Restored workspace data: (name, pane_manager, launch_dir).
+pub type RestoredWorkspaces = (Vec<(String, PaneManager, String)>, usize);
+
 /// Serializable session state (supports multiple workspaces).
 #[derive(Serialize, Deserialize)]
 pub struct Session {
@@ -227,7 +230,7 @@ pub fn restore_session(session: &Session) -> Result<PaneManager> {
 }
 
 /// Restore multi-workspace session. Returns Vec of (name, PaneManager, launch_dir) + active index.
-pub fn restore_multi_session(session: &Session) -> Result<(Vec<(String, PaneManager, String)>, usize)> {
+pub fn restore_multi_session(session: &Session) -> Result<RestoredWorkspaces> {
     if session.workspaces.is_empty() {
         // Legacy single-workspace session
         let mgr = restore_session(session)?;

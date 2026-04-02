@@ -119,10 +119,10 @@ impl LspClient {
             })?;
 
         let stdin = child.stdin.take().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "Failed to get server stdin")
+            io::Error::other("Failed to get server stdin")
         })?;
         let stdout = child.stdout.take().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "Failed to get server stdout")
+            io::Error::other("Failed to get server stdout")
         })?;
 
         let writer = BufWriter::new(stdin);
@@ -173,16 +173,13 @@ impl LspClient {
     pub fn poll(&mut self) -> Vec<LspEvent> {
         let mut events = Vec::new();
         while let Ok(event) = self.receiver.try_recv() {
-            match &event {
-                LspEvent::Initialized => {
-                    self.initialized = true;
-                    // Flush queued didOpen notifications
-                    let queued = std::mem::take(&mut self.queued_opens);
-                    for (uri, lang_id, version, text) in queued {
-                        let _ = self.did_open(&uri, &lang_id, version, &text);
-                    }
+            if let LspEvent::Initialized = &event {
+                self.initialized = true;
+                // Flush queued didOpen notifications
+                let queued = std::mem::take(&mut self.queued_opens);
+                for (uri, lang_id, version, text) in queued {
+                    let _ = self.did_open(&uri, &lang_id, version, &text);
                 }
-                _ => {}
             }
             events.push(event);
         }

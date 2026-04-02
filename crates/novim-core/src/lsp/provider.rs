@@ -71,6 +71,12 @@ pub struct LspRegistry {
     config_servers: HashMap<String, ResolvedServer>, // keyed by extension
 }
 
+impl Default for LspRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LspRegistry {
     /// Create a registry with built-in providers.
     pub fn new() -> Self {

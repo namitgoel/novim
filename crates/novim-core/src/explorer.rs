@@ -100,6 +100,11 @@ impl Explorer {
         self.flat.len()
     }
 
+    /// Check if there are no visible entries.
+    pub fn is_empty(&self) -> bool {
+        self.flat.is_empty()
+    }
+
     /// Move cursor up.
     pub fn cursor_up(&mut self) {
         if self.cursor > 0 {

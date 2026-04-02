@@ -1,8 +1,9 @@
 //! Terminal grid — a 2D array of styled cells representing a virtual screen.
 
 /// ANSI color
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum CellColor {
+    #[default]
     Default,
     Black,
     Red,
@@ -23,11 +24,6 @@ pub enum CellColor {
     Indexed(u8),
 }
 
-impl Default for CellColor {
-    fn default() -> Self {
-        CellColor::Default
-    }
-}
 
 /// Cell attributes
 #[derive(Clone, Copy, Default)]
@@ -117,6 +113,14 @@ impl Grid {
 
     pub fn rows(&self) -> usize {
         self.rows
+    }
+
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    pub fn wrap_pending(&self) -> bool {
+        self.wrap_pending
     }
 
     // --- Pen / style ---

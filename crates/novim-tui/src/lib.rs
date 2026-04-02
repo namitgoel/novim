@@ -237,7 +237,7 @@ impl TerminalManager {
                             EditorMode::Insert => &self.state.config.keybindings.insert,
                             _ => &self.state.config.keybindings.normal,
                         };
-                        let (cmd, new_input_state) = if let Some(custom_cmd) = lookup_custom_keybinding(self.state.mode, &key, custom_bindings) {
+                        let (cmd, new_input_state) = if let Some(custom_cmd) = lookup_custom_keybinding(&key, custom_bindings) {
                             (custom_cmd, InputState::Ready)
                         } else {
                             key_to_command(self.state.mode, self.state.input_state, key, in_terminal, popup_showing)

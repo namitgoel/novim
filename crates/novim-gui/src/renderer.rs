@@ -265,21 +265,16 @@ fn render_full_editor(state: &mut crate::WindowState, cols: usize, rows: usize) 
     let in_search = editor.search.active;
 
     // Vertical layout: [tab_bar?] [main_area] [status_bar] [cmd_line?]
-    let mut y = 0usize;
-    let tab_bar_row = if has_tabs { let r = y; y += 1; Some(r) } else { None };
-    let _main_top = y;
+    let tab_bar_rows = if has_tabs { 1usize } else { 0 };
+    let tab_bar_row = if has_tabs { Some(0) } else { None };
     let bottom_rows = 1 + if in_command || in_search { 1 } else { 0 };
-    let main_rows = rows.saturating_sub(y + bottom_rows);
-    y += main_rows;
-    let _status_row = y;
-    y += 1;
-    let _cmd_row = if in_command || in_search { Some(y) } else { None };
+    let main_rows = rows.saturating_sub(tab_bar_rows + bottom_rows);
 
     // Collect all lines as rich spans
     let mut screen_lines: Vec<Vec<RichSpan>> = Vec::with_capacity(rows);
 
     // Tab bar
-    if let Some(_) = tab_bar_row {
+    if tab_bar_row.is_some() {
         screen_lines.push(render_tab_bar(editor, cols));
     }
 
@@ -338,6 +333,22 @@ fn render_full_editor(state: &mut crate::WindowState, cols: usize, rows: usize) 
         screen_lines.push(vec![RichSpan { text: " ".repeat(cols), color: FG }]);
     }
 
+    // ── Popup overlays (drawn on top of base screen) ──
+    let cell_w = state.gpu.cell_width;
+    let cell_h = state.gpu.cell_height;
+    let mut bg_rects: Vec<crate::gpu::BgRect> = Vec::new();
+    let editor = &state.editor;
+
+    if editor.finder.visible {
+        overlay_finder(&mut screen_lines, &mut bg_rects, editor, cols, rows, cell_w, cell_h);
+    } else if editor.show_help {
+        overlay_help(&mut screen_lines, &mut bg_rects, editor, cols, rows, cell_w, cell_h);
+    } else if editor.tabs[editor.active_tab].show_buffer_list {
+        overlay_buffer_list(&mut screen_lines, &mut bg_rects, editor, cols, rows, cell_w, cell_h);
+    } else if editor.show_workspace_list {
+        overlay_workspace_list(&mut screen_lines, &mut bg_rects, editor, cols, rows, cell_w, cell_h);
+    }
+
     // ── Convert screen_lines to flat rich_spans (consume to avoid cloning) ──
     let mut rich_spans: Vec<(String, Color)> = Vec::with_capacity(screen_lines.len() * 8);
     for (i, line) in screen_lines.drain(..).enumerate() {
@@ -351,7 +362,339 @@ fn render_full_editor(state: &mut crate::WindowState, cols: usize, rows: usize) 
         }
     }
 
-    submit_frame(state, &rich_spans, &[]);
+    submit_frame(state, &rich_spans, &bg_rects);
+}
+
+// ── Popup overlay helpers ─────────────────────────────────────────────────────
+
+const POPUP_BORDER: Color = Color::rgb(80, 180, 230);
+const POPUP_TEXT: Color = Color::rgb(220, 220, 220);
+const POPUP_DIM: Color = Color::rgb(140, 140, 140);
+const POPUP_HIGHLIGHT: Color = Color::rgb(255, 255, 255);
+const POPUP_BG_F32: [f32; 4] = [0.17, 0.17, 0.22, 1.0]; // ~(45,45,55)
+const POPUP_SELECTED_F32: [f32; 4] = [0.10, 0.30, 0.50, 1.0]; // blue highlight
+
+/// Stamp a single text line into screen_lines at (row, col), with bg rect.
+#[allow(clippy::too_many_arguments)]
+fn stamp_line(
+    screen_lines: &mut [Vec<RichSpan>],
+    bg_rects: &mut Vec<crate::gpu::BgRect>,
+    row: usize,
+    col: usize,
+    width: usize,
+    text: &str,
+    fg: Color,
+    bg: [f32; 4],
+    cell_w: f32,
+    cell_h: f32,
+) {
+    if row >= screen_lines.len() { return; }
+    // Background rect for the whole line
+    bg_rects.push(crate::gpu::BgRect {
+        x: col as f32 * cell_w,
+        y: row as f32 * cell_h,
+        w: width as f32 * cell_w,
+        h: cell_h,
+        color: bg,
+    });
+    // Truncate or pad text to width
+    let display: String = {
+        let chars: Vec<char> = text.chars().collect();
+        if chars.len() >= width {
+            chars[..width].iter().collect()
+        } else {
+            let mut s: String = chars.into_iter().collect();
+            while s.chars().count() < width { s.push(' '); }
+            s
+        }
+    };
+    // Replace the line content at this position
+    screen_lines[row] = build_line_with_overlay(
+        &screen_lines[row], col, width, &display, fg,
+    );
+}
+
+/// Build a new line by overlaying text at a given column range.
+fn build_line_with_overlay(
+    _existing: &[RichSpan],
+    col: usize,
+    width: usize,
+    text: &str,
+    fg: Color,
+) -> Vec<RichSpan> {
+    // Simple approach: just produce spans for the full line.
+    // The bg_rect handles the background color.
+    let mut result = Vec::new();
+    if col > 0 {
+        // Recalculate existing content length before the overlay.
+        // For simplicity, pad with spaces (the existing content behind is covered by bg_rect).
+        let mut existing_text = String::new();
+        let mut len = 0;
+        for span in _existing {
+            for ch in span.text.chars() {
+                if ch == '\n' { continue; }
+                if len < col {
+                    existing_text.push(ch);
+                    len += 1;
+                }
+            }
+        }
+        while existing_text.len() < col { existing_text.push(' '); }
+        result.push(RichSpan { text: existing_text, color: FG });
+    }
+    result.push(RichSpan { text: text.to_string(), color: fg });
+    // Remaining content after the overlay
+    let end_col = col + width;
+    let mut after_text = String::new();
+    let mut pos = 0;
+    for span in _existing {
+        for ch in span.text.chars() {
+            if ch == '\n' { continue; }
+            if pos >= end_col {
+                after_text.push(ch);
+            }
+            pos += 1;
+        }
+    }
+    if !after_text.is_empty() {
+        result.push(RichSpan { text: after_text, color: FG });
+    }
+    result
+}
+
+/// File finder popup overlay.
+fn overlay_finder(
+    screen_lines: &mut [Vec<RichSpan>],
+    bg_rects: &mut Vec<crate::gpu::BgRect>,
+    editor: &EditorState,
+    cols: usize,
+    rows: usize,
+    cell_w: f32,
+    cell_h: f32,
+) {
+    let popup_w = (cols * 3 / 5).max(40).min(cols.saturating_sub(4));
+    let popup_h = (rows * 3 / 5).max(10).min(rows.saturating_sub(4));
+    let x = (cols.saturating_sub(popup_w)) / 2;
+    let y = (rows.saturating_sub(popup_h)) / 2;
+
+    // Top border
+    let title = format!(" Find Files ({}) ", editor.finder.results.len());
+    let border_top = format!("╭{}{}╮",
+        title,
+        "─".repeat(popup_w.saturating_sub(title.len() + 2)),
+    );
+    stamp_line(screen_lines, bg_rects, y, x, popup_w, &border_top, POPUP_BORDER, POPUP_BG_F32, cell_w, cell_h);
+
+    // Search input line
+    let input = format!("│ > {}{}│",
+        editor.finder.query,
+        " ".repeat(popup_w.saturating_sub(editor.finder.query.len() + 6).max(0)),
+    );
+    stamp_line(screen_lines, bg_rects, y + 1, x, popup_w, &input, POPUP_HIGHLIGHT, POPUP_BG_F32, cell_w, cell_h);
+
+    // Separator
+    let sep = format!("├{}┤", "─".repeat(popup_w.saturating_sub(2)));
+    stamp_line(screen_lines, bg_rects, y + 2, x, popup_w, &sep, POPUP_BORDER, POPUP_BG_F32, cell_w, cell_h);
+
+    // Results
+    let visible_count = popup_h.saturating_sub(4); // top border + input + separator + bottom border
+    let scroll = if editor.finder.selected >= visible_count {
+        editor.finder.selected - visible_count + 1
+    } else {
+        0
+    };
+
+    for i in 0..visible_count {
+        let row = y + 3 + i;
+        let idx = scroll + i;
+        if idx < editor.finder.results.len() {
+            let is_selected = idx == editor.finder.selected;
+            let result = &editor.finder.results[idx];
+            let max_len = popup_w.saturating_sub(4);
+            let display = if result.display.len() > max_len {
+                format!("...{}", &result.display[result.display.len().saturating_sub(max_len.saturating_sub(3))..])
+            } else {
+                result.display.clone()
+            };
+            let line = format!("│ {}{}│",
+                display,
+                " ".repeat(popup_w.saturating_sub(display.len() + 4).max(0)),
+            );
+            let bg = if is_selected { POPUP_SELECTED_F32 } else { POPUP_BG_F32 };
+            let fg = if is_selected { POPUP_HIGHLIGHT } else { POPUP_TEXT };
+            stamp_line(screen_lines, bg_rects, row, x, popup_w, &line, fg, bg, cell_w, cell_h);
+        } else {
+            let empty = format!("│{}│", " ".repeat(popup_w.saturating_sub(2)));
+            stamp_line(screen_lines, bg_rects, row, x, popup_w, &empty, POPUP_DIM, POPUP_BG_F32, cell_w, cell_h);
+        }
+    }
+
+    // Bottom border
+    let border_bottom = format!("╰{}╯", "─".repeat(popup_w.saturating_sub(2)));
+    stamp_line(screen_lines, bg_rects, y + popup_h - 1, x, popup_w, &border_bottom, POPUP_BORDER, POPUP_BG_F32, cell_w, cell_h);
+}
+
+/// Help popup overlay.
+fn overlay_help(
+    screen_lines: &mut [Vec<RichSpan>],
+    bg_rects: &mut Vec<crate::gpu::BgRect>,
+    editor: &EditorState,
+    cols: usize,
+    rows: usize,
+    cell_w: f32,
+    cell_h: f32,
+) {
+    let popup_w = 60usize.min(cols.saturating_sub(4));
+    let popup_h = (rows * 3 / 4).min(rows.saturating_sub(4));
+    let x = (cols.saturating_sub(popup_w)) / 2;
+    let y = (rows.saturating_sub(popup_h)) / 2;
+
+    let help_lines = vec![
+        "Novim Shortcuts",
+        "",
+        "── Navigation ──",
+        "h/j/k/l        Move cursor",
+        "Ctrl+U/D       Scroll half page",
+        "gg / G         Top / Bottom",
+        "",
+        "── Editing ──",
+        "i / a          Insert / Append",
+        "o / O          Open line below / above",
+        "dd             Delete line",
+        "yy / p         Yank / Paste",
+        "u / Ctrl+R     Undo / Redo",
+        "",
+        "── Cmd Shortcuts (GUI) ──",
+        "Cmd+P / Cmd+F  File finder",
+        "Cmd+E          Toggle explorer",
+        "Cmd+T          New terminal",
+        "Cmd+S          Save",
+        "Cmd+W ...      Pane commands",
+        "Cmd+N          Next tab",
+        "Cmd+Q          Quit",
+        "Cmd+/          Search",
+        "Cmd+?          This help",
+        "",
+        "── Pane Commands (Ctrl+W) ──",
+        "Ctrl+W s/v     Split H / V",
+        "Ctrl+W h/j/k/l Focus direction",
+        "Ctrl+W q       Close pane",
+        "Ctrl+W t       Open terminal",
+        "Ctrl+W f       File finder",
+        "",
+        "── Command mode ──",
+        ":w / :q / :wq  Save / Quit",
+        ":e <file>      Open file",
+        ":term          Open terminal",
+        "",
+        "Press Esc or ? to close",
+    ];
+
+    let title = " Help ";
+    let border_top = format!("╭{}{}╮", title, "─".repeat(popup_w.saturating_sub(title.len() + 2)));
+    stamp_line(screen_lines, bg_rects, y, x, popup_w, &border_top, POPUP_BORDER, POPUP_BG_F32, cell_w, cell_h);
+
+    let visible = popup_h.saturating_sub(2);
+    let scroll = editor.help_scroll;
+    for i in 0..visible {
+        let row = y + 1 + i;
+        let idx = scroll + i;
+        let text = if idx < help_lines.len() { help_lines[idx] } else { "" };
+        let line = format!("│ {}{}│",
+            text,
+            " ".repeat(popup_w.saturating_sub(text.len() + 4).max(0)),
+        );
+        let fg = if text.starts_with("──") { POPUP_BORDER } else { POPUP_TEXT };
+        stamp_line(screen_lines, bg_rects, row, x, popup_w, &line, fg, POPUP_BG_F32, cell_w, cell_h);
+    }
+
+    let border_bottom = format!("╰{}╯", "─".repeat(popup_w.saturating_sub(2)));
+    stamp_line(screen_lines, bg_rects, y + popup_h - 1, x, popup_w, &border_bottom, POPUP_BORDER, POPUP_BG_F32, cell_w, cell_h);
+}
+
+/// Buffer list popup overlay.
+fn overlay_buffer_list(
+    screen_lines: &mut [Vec<RichSpan>],
+    bg_rects: &mut Vec<crate::gpu::BgRect>,
+    editor: &EditorState,
+    cols: usize,
+    rows: usize,
+    cell_w: f32,
+    cell_h: f32,
+) {
+    let ws = &editor.tabs[editor.active_tab];
+    let core_area = novim_types::Rect::new(0, 0, cols as u16, rows as u16);
+    let layouts = ws.panes.layout(core_area);
+    let buffers: Vec<String> = layouts.iter().map(|(id, _)| {
+        ws.panes.get_pane(*id)
+            .map(|p| p.content.as_buffer_like().display_name().to_string())
+            .unwrap_or_else(|| format!("pane {}", id))
+    }).collect();
+    let popup_w = 50usize.min(cols.saturating_sub(4));
+    let popup_h = (buffers.len() + 4).min(rows.saturating_sub(4));
+    let x = (cols.saturating_sub(popup_w)) / 2;
+    let y = (rows.saturating_sub(popup_h)) / 2;
+
+    let title = " Buffers ";
+    let border_top = format!("╭{}{}╮", title, "─".repeat(popup_w.saturating_sub(title.len() + 2)));
+    stamp_line(screen_lines, bg_rects, y, x, popup_w, &border_top, POPUP_BORDER, POPUP_BG_F32, cell_w, cell_h);
+
+    for (i, name) in buffers.iter().enumerate() {
+        let row = y + 1 + i;
+        if row >= y + popup_h - 1 { break; }
+        let line = format!("│ {}{}│",
+            name,
+            " ".repeat(popup_w.saturating_sub(name.len() + 4).max(0)),
+        );
+        stamp_line(screen_lines, bg_rects, row, x, popup_w, &line, POPUP_TEXT, POPUP_BG_F32, cell_w, cell_h);
+    }
+
+    // Fill remaining rows
+    for row in (y + 1 + buffers.len())..(y + popup_h - 1) {
+        let empty = format!("│{}│", " ".repeat(popup_w.saturating_sub(2)));
+        stamp_line(screen_lines, bg_rects, row, x, popup_w, &empty, POPUP_DIM, POPUP_BG_F32, cell_w, cell_h);
+    }
+
+    let border_bottom = format!("╰{}╯", "─".repeat(popup_w.saturating_sub(2)));
+    stamp_line(screen_lines, bg_rects, y + popup_h - 1, x, popup_w, &border_bottom, POPUP_BORDER, POPUP_BG_F32, cell_w, cell_h);
+}
+
+/// Workspace list popup overlay.
+fn overlay_workspace_list(
+    screen_lines: &mut [Vec<RichSpan>],
+    bg_rects: &mut Vec<crate::gpu::BgRect>,
+    editor: &EditorState,
+    cols: usize,
+    rows: usize,
+    cell_w: f32,
+    cell_h: f32,
+) {
+    let popup_w = 50usize.min(cols.saturating_sub(4));
+    let popup_h = (editor.tabs.len() + 4).min(rows.saturating_sub(4));
+    let x = (cols.saturating_sub(popup_w)) / 2;
+    let y = (rows.saturating_sub(popup_h)) / 2;
+
+    let title = " Workspaces ";
+    let border_top = format!("╭{}{}╮", title, "─".repeat(popup_w.saturating_sub(title.len() + 2)));
+    stamp_line(screen_lines, bg_rects, y, x, popup_w, &border_top, POPUP_BORDER, POPUP_BG_F32, cell_w, cell_h);
+
+    for (i, ws) in editor.tabs.iter().enumerate() {
+        let row = y + 1 + i;
+        if row >= y + popup_h - 1 { break; }
+        let is_active = i == editor.active_tab;
+        let marker = if is_active { "* " } else { "  " };
+        let text = format!("{}{}", marker, ws.name);
+        let line = format!("│ {}{}│",
+            text,
+            " ".repeat(popup_w.saturating_sub(text.len() + 4).max(0)),
+        );
+        let bg = if i == editor.workspace_list_selected { POPUP_SELECTED_F32 } else { POPUP_BG_F32 };
+        let fg = if is_active { POPUP_HIGHLIGHT } else { POPUP_TEXT };
+        stamp_line(screen_lines, bg_rects, row, x, popup_w, &line, fg, bg, cell_w, cell_h);
+    }
+
+    let border_bottom = format!("╰{}╯", "─".repeat(popup_w.saturating_sub(2)));
+    stamp_line(screen_lines, bg_rects, y + popup_h - 1, x, popup_w, &border_bottom, POPUP_BORDER, POPUP_BG_F32, cell_w, cell_h);
 }
 
 /// Content-hash cache + glyphon submission shared by both render paths.
@@ -462,7 +805,7 @@ fn render_pane_area(editor: &EditorState, cols: usize, rows: usize) -> Vec<Vec<R
     let ln_mode = editor.line_number_mode;
     let syntax_theme = &editor.config.syntax_theme;
     let tab_width = editor.config.editor.tab_width;
-    let search_pattern = if editor.search.active || editor.search.pattern.as_ref().map_or(false, |s| !s.is_empty()) {
+    let search_pattern = if editor.search.active || editor.search.pattern.as_ref().is_some_and(|s| !s.is_empty()) {
         editor.search.pattern.as_deref()
     } else {
         None
@@ -517,6 +860,7 @@ fn render_pane_area(editor: &EditorState, cols: usize, rows: usize) -> Vec<Vec<R
     grid
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_single_pane(
     pane: &Pane,
     is_focused: bool,
@@ -770,8 +1114,8 @@ fn render_status_bar(editor: &EditorState, cols: usize) -> Vec<RichSpan> {
         } else { String::new() }
     };
 
-    let mode_name = if editor.macros.recording.is_some() {
-        format!("REC @{}", editor.macros.recording.unwrap())
+    let mode_name = if let Some(reg) = editor.macros.recording {
+        format!("REC @{}", reg)
     } else if editor.input_state == novim_core::input::InputState::WaitingPaneCommand {
         "CTRL+W...".to_string()
     } else if buf.is_terminal() {

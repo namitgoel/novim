@@ -57,7 +57,7 @@ fn display_col(line: &str, cursor_col: usize, tab_width: usize) -> usize {
 fn wrapped_row_count(line: &str, width: usize) -> usize {
     if width == 0 || line.is_empty() { return 1; }
     let len = line.len();
-    ((len + width - 1) / width).max(1)
+    len.div_ceil(width).max(1)
 }
 
 /// Split a line into wrapped segments of at most `width` characters.
@@ -284,6 +284,7 @@ fn render_panes(f: &mut ratatui::Frame, area: Rect, state: &mut EditorState, bor
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_single_pane(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -562,9 +563,7 @@ fn render_single_pane(
     if is_focused && available_height > 0 {
         let cursor = pane.content.as_buffer_like().cursor();
         let border_off: u16 = if borderless { 0 } else { 1 };
-        let col_offset: u16 = if is_terminal {
-            border_off
-        } else if ln_mode == super::LineNumberMode::Off {
+        let col_offset: u16 = if is_terminal || ln_mode == super::LineNumberMode::Off {
             border_off
         } else {
             border_off + 5
@@ -581,10 +580,8 @@ fn render_single_pane(
         } else {
             let cursor_line_on_screen = if is_terminal {
                 cursor.line
-            } else if cursor.line >= pane.viewport_offset {
-                cursor.line - pane.viewport_offset
             } else {
-                0
+                cursor.line.saturating_sub(pane.viewport_offset)
             };
             if cursor_line_on_screen < available_height {
                 let visual_col = if is_terminal {
@@ -658,8 +655,7 @@ fn render_status_bar(f: &mut ratatui::Frame, area: Rect, state: &mut EditorState
         String::new()
     };
 
-    let mode_name = if state.macros.recording.is_some() {
-        let reg = state.macros.recording.unwrap();
+    let mode_name = if let Some(reg) = state.macros.recording {
         &format!("REC @{}", reg)
     } else if state.input_state == novim_core::input::InputState::WaitingPaneCommand {
         "CTRL+W..."
@@ -1076,8 +1072,11 @@ fn render_finder_list(f: &mut ratatui::Frame, area: Rect, state: &EditorState) {
         };
 
         let max_len = list_width as usize - 4;
-        let display = if result.display.len() > max_len {
-            format!("...{}", &result.display[result.display.len().saturating_sub(max_len - 3)..])
+        let char_count = result.display.chars().count();
+        let display = if char_count > max_len {
+            let skip = char_count.saturating_sub(max_len - 3);
+            let tail: String = result.display.chars().skip(skip).collect();
+            format!("...{}", tail)
         } else {
             result.display.clone()
         };

@@ -52,7 +52,7 @@ impl TerminalPane {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         // Spawn the user's shell
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
@@ -62,7 +62,7 @@ impl TerminalPane {
         let child = pty_pair
             .slave
             .spawn_command(cmd)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         // Get child PID for cwd detection
         let child_pid = child.process_id();
@@ -72,7 +72,7 @@ impl TerminalPane {
         let writer = pty_pair
             .master
             .take_writer()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
 
@@ -80,7 +80,7 @@ impl TerminalPane {
         let mut reader = pty_pair
             .master
             .try_clone_reader()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         let waker = PTY_WAKER.get().cloned();
         let handle = thread::spawn(move || {
@@ -197,9 +197,17 @@ impl TerminalPane {
                 Ok(data) => {
                     let mut performer = GridPerformer {
                         grid: &mut self.grid,
+                        responses: Vec::new(),
                     };
                     for byte in &data {
                         self.parser.advance(&mut performer, *byte);
+                    }
+                    // Flush any responses (e.g. DSR cursor position) back to the PTY.
+                    if !performer.responses.is_empty() {
+                        for response in performer.responses.drain(..) {
+                            let _ = self.writer.write_all(&response);
+                        }
+                        let _ = self.writer.flush();
                     }
                     consumed = true;
                     budget -= 1;

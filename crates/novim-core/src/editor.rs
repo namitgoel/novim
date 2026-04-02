@@ -8,7 +8,7 @@ use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind, MouseButton};
 
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::buffer::{Buffer, BufferLike};
@@ -54,6 +54,8 @@ pub struct Workspace {
     pub buffer_history: Vec<String>,
     pub buffer_history_idx: usize,
     pub launch_dir: PathBuf,
+    /// Cached CWD from the last-seen terminal (survives terminal pane replacement).
+    pub last_shell_cwd: Option<PathBuf>,
     // LSP
     lsp_registry: Arc<LspRegistry>,
     pub lsp_clients: HashMap<String, LspClient>,
@@ -73,6 +75,7 @@ impl Workspace {
             buffer_history: Vec::new(),
             buffer_history_idx: 0,
             launch_dir: std::env::current_dir().unwrap_or_default(),
+            last_shell_cwd: None,
             lsp_registry: registry,
             lsp_clients: HashMap::new(),
             diagnostics: HashMap::new(),
@@ -96,12 +99,12 @@ impl Workspace {
         Ok(ws)
     }
 
-    pub fn new_terminal_at(name: &str, dir: &PathBuf, registry: Arc<LspRegistry>, screen_area: novim_types::Rect) -> Self {
+    pub fn new_terminal_at(name: &str, dir: &Path, registry: Arc<LspRegistry>, screen_area: novim_types::Rect) -> Self {
         let rows = (screen_area.height / 2).max(5);
         let cols = screen_area.width.saturating_sub(2);
         let panes = PaneManager::new_terminal(rows, cols).unwrap_or_else(|_| PaneManager::new(Buffer::new()));
         let mut ws = Self::new_with(name, panes, registry);
-        ws.launch_dir = dir.clone();
+        ws.launch_dir = dir.to_path_buf();
         ws
     }
 
@@ -151,7 +154,19 @@ impl Workspace {
 
     /// Poll terminal panes for output.
     pub fn poll_terminals(&mut self) -> bool {
-        self.panes.poll_terminals()
+        let changed = self.panes.poll_terminals();
+        // Keep the cached shell CWD up-to-date while terminals are alive.
+        if let Some(cwd) = self.panes.any_terminal_shell_cwd() {
+            self.last_shell_cwd = Some(cwd);
+        }
+        changed
+    }
+
+    /// Best-effort shell CWD: live terminal → cached → launch_dir.
+    pub fn shell_cwd(&self) -> PathBuf {
+        self.panes.any_terminal_shell_cwd()
+            .or_else(|| self.last_shell_cwd.clone())
+            .unwrap_or_else(|| self.launch_dir.clone())
     }
 
     /// Resize all terminal panes in this workspace.
@@ -428,10 +443,10 @@ impl EditorState {
         let cfg = config::load_config();
         let registry = Arc::new(LspRegistry::from_config(&cfg));
         let sess = session::load_session(name)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         let (ws_data, active) = session::restore_multi_session(&sess)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         let tabs: Vec<Workspace> = ws_data
             .into_iter()
@@ -682,7 +697,7 @@ impl EditorState {
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::OpenFileFinder => {
-                let root = self.tabs[idx].launch_dir.clone();
+                let root = self.tabs[idx].shell_cwd();
                 self.finder.root = root.clone();
                 self.finder.query.clear();
                 self.finder.results = finder::find_files(&root, "", 50);
@@ -696,7 +711,7 @@ impl EditorState {
                 let root = {
                     let p = PathBuf::from(&path);
                     if p.is_absolute() { p } else {
-                        std::env::current_dir().unwrap_or_default().join(p)
+                        self.tabs[idx].shell_cwd().join(p)
                     }
                 };
                 self.finder.root = root.clone();
@@ -748,7 +763,7 @@ impl EditorState {
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::OpenTab(path) => {
-                let dir = resolve_path(&path, &self.tabs[idx].panes);
+                let dir = resolve_path(&path, &self.tabs[idx].panes, self.tabs[idx].last_shell_cwd.as_ref());
                 let name = dir.file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "new".to_string());
@@ -1224,18 +1239,10 @@ impl EditorState {
     fn open_explorer_at(&mut self, path: Option<&str>) {
         let idx = self.active_tab;
         let dir = match path {
-            Some(".") | None => {
-                self.tabs[idx].panes.focused_pane()
-                    .content.as_buffer_like().shell_cwd()
-                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
-            }
+            Some(".") | None => self.tabs[idx].shell_cwd(),
             Some(p) => {
                 let p = PathBuf::from(p);
-                if p.is_absolute() {
-                    p
-                } else {
-                    std::env::current_dir().unwrap_or_default().join(p)
-                }
+                if p.is_absolute() { p } else { self.tabs[idx].shell_cwd().join(p) }
             }
         };
         match Explorer::new(&dir) {
@@ -1369,7 +1376,7 @@ impl EditorState {
             _ if opt.starts_with("tabstop=") || opt.starts_with("ts=") => {
                 let val = opt.split('=').nth(1).unwrap_or("4");
                 if let Ok(tw) = val.parse::<usize>() {
-                    self.config.editor.tab_width = tw.max(1).min(16);
+                    self.config.editor.tab_width = tw.clamp(1, 16);
                     self.status_message = Some(format!("tabstop={}", self.config.editor.tab_width));
                 } else {
                     return Err(NovimError::Command(format!("Invalid tabstop: {}", val)));
@@ -1385,6 +1392,8 @@ impl EditorState {
     pub fn handle_edit_file(&mut self, path: &str) -> Result<ExecOutcome, NovimError> {
         let idx = self.active_tab;
         let buffer = Buffer::from_file(path)?;
+        // Always replace the focused pane. If a terminal is destroyed,
+        // last_shell_cwd keeps its CWD cached for explorer/finder.
         let pane = self.tabs[idx].panes.focused_pane_mut();
         pane.content = PaneContent::Editor(buffer);
         pane.viewport_offset = 0;
@@ -1407,14 +1416,16 @@ impl EditorState {
 }
 
 /// Resolve a path relative to the focused pane's working directory.
-pub fn resolve_path(path: &str, panes: &PaneManager) -> PathBuf {
+pub fn resolve_path(path: &str, panes: &PaneManager, last_shell_cwd: Option<&PathBuf>) -> PathBuf {
+    let base = panes.any_terminal_shell_cwd()
+        .or_else(|| last_shell_cwd.cloned())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     if path == "." {
-        panes.focused_pane().content.as_buffer_like().shell_cwd()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+        base
     } else {
         let p = PathBuf::from(path);
         if p.is_absolute() { p } else {
-            std::env::current_dir().unwrap_or_default().join(p)
+            base.join(p)
         }
     }
 }

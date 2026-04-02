@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Novim configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NovimConfig {
     pub editor: EditorConfig,
@@ -100,7 +100,7 @@ impl Default for SyntaxTheme {
 }
 
 /// Keybinding configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeybindingsConfig {
     /// Normal mode keybindings: { "u" = "undo", "Ctrl+z" = "undo" }
@@ -109,27 +109,6 @@ pub struct KeybindingsConfig {
     pub insert: HashMap<String, String>,
 }
 
-impl Default for KeybindingsConfig {
-    fn default() -> Self {
-        Self {
-            normal: HashMap::new(),
-            insert: HashMap::new(),
-        }
-    }
-}
-
-impl Default for NovimConfig {
-    fn default() -> Self {
-        Self {
-            editor: EditorConfig::default(),
-            theme: ThemeConfig::default(),
-            syntax_theme: SyntaxTheme::default(),
-            terminal: TerminalConfig::default(),
-            lsp: LspConfig::default(),
-            keybindings: KeybindingsConfig::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -230,7 +209,7 @@ pub fn save_default_config() -> std::io::Result<String> {
 
     let config = NovimConfig::default();
     let content = toml::to_string_pretty(&config)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
     fs::write(&path, &content)?;
     Ok(format!("Config saved to {}", path.display()))

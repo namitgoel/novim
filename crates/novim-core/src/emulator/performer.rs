@@ -6,6 +6,8 @@ use super::grid::{CellAttrs, CellColor, Grid};
 
 pub struct GridPerformer<'a> {
     pub grid: &'a mut Grid,
+    /// Accumulated responses to write back to the PTY (e.g. DSR replies).
+    pub responses: Vec<Vec<u8>>,
 }
 
 impl<'a> Perform for GridPerformer<'a> {
@@ -70,6 +72,16 @@ impl<'a> Perform for GridPerformer<'a> {
             }
         }
 
+        // Bail out for any other intermediate-bearing sequences we don't handle.
+        if !intermediates.is_empty() {
+            // CSI > c  → DA2 (Secondary Device Attributes)
+            if intermediates == [b'>'] && action == 'c' {
+                // Report as VT220: CSI > 1;10;0c
+                self.responses.push(b"\x1b[>1;10;0c".to_vec());
+            }
+            return;
+        }
+
         match action {
             'A' => self.grid.move_cursor_up(p1),
             'B' => self.grid.move_cursor_down(p1),
@@ -118,6 +130,30 @@ impl<'a> Perform for GridPerformer<'a> {
                 let bottom = params.get(1).copied().unwrap_or(self.grid.rows() as u16) as usize;
                 self.grid.set_scroll_region(top.saturating_sub(1), bottom.saturating_sub(1));
             }
+            'n' => {
+                // DSR — Device Status Report
+                let mode = params.first().copied().unwrap_or(0);
+                match mode {
+                    5 => {
+                        // Status report — respond "OK"
+                        self.responses.push(b"\x1b[0n".to_vec());
+                    }
+                    6 => {
+                        // Cursor Position Report — respond with current position (1-based)
+                        let row = self.grid.cursor_row() + 1;
+                        let col = self.grid.cursor_col() + 1;
+                        self.responses.push(format!("\x1b[{};{}R", row, col).into_bytes());
+                    }
+                    _ => {}
+                }
+            }
+            'c' => {
+                // DA — Device Attributes (primary)
+                if params.first().copied().unwrap_or(0) == 0 {
+                    // Report as VT220
+                    self.responses.push(b"\x1b[?62;1;2;6;7;8;9c".to_vec());
+                }
+            }
             // SGR — Select Graphic Rendition (colors & styles)
             'm' => self.handle_sgr(&params),
             _ => {}
@@ -137,24 +173,16 @@ impl<'a> GridPerformer<'a> {
             match params[i] {
                 0 => self.grid.reset_pen(),
                 1 => {
-                    let mut attrs = CellAttrs::default();
-                    attrs.bold = true;
-                    self.grid.set_pen_attrs(attrs);
+                    self.grid.set_pen_attrs(CellAttrs { bold: true, ..CellAttrs::default() });
                 }
                 2 => {
-                    let mut attrs = CellAttrs::default();
-                    attrs.dim = true;
-                    self.grid.set_pen_attrs(attrs);
+                    self.grid.set_pen_attrs(CellAttrs { dim: true, ..CellAttrs::default() });
                 }
                 4 => {
-                    let mut attrs = CellAttrs::default();
-                    attrs.underline = true;
-                    self.grid.set_pen_attrs(attrs);
+                    self.grid.set_pen_attrs(CellAttrs { underline: true, ..CellAttrs::default() });
                 }
                 7 => {
-                    let mut attrs = CellAttrs::default();
-                    attrs.reverse = true;
-                    self.grid.set_pen_attrs(attrs);
+                    self.grid.set_pen_attrs(CellAttrs { reverse: true, ..CellAttrs::default() });
                 }
                 22 => self.grid.set_pen_attrs(CellAttrs::default()), // Normal intensity
                 24 => self.grid.set_pen_attrs(CellAttrs::default()), // No underline

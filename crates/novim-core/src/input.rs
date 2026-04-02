@@ -74,7 +74,6 @@ pub fn command_from_name(name: &str) -> EditorCommand {
 /// Try to resolve a key event from custom keybindings.
 /// Returns Some(command) if found, None to fall back to defaults.
 pub fn lookup_custom_keybinding(
-    _mode: EditorMode,
     key: &KeyEvent,
     bindings: &HashMap<String, String>,
 ) -> Option<EditorCommand> {
@@ -316,13 +315,13 @@ pub fn key_to_command(
         };
     }
 
-    // Ctrl+C always quits
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        return (EditorCommand::ForceQuit, InputState::Ready);
+    // Ctrl+C: cancel current operation (non-terminal), forward to PTY (terminal).
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) && !in_terminal {
+        return (EditorCommand::ClearSearch, InputState::Ready);
     }
 
-    // Ctrl+L forces full redraw
-    if key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    // Ctrl+L forces full redraw (non-terminal only; terminals forward the key).
+    if key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL) && !in_terminal {
         return (EditorCommand::ForceRedraw, InputState::Ready);
     }
 
@@ -461,8 +460,9 @@ fn normal_mode_command(key: KeyEvent) -> (EditorCommand, InputState) {
         // Operators: d = delete, c = change
         KeyCode::Char('d') => (EditorCommand::Noop, InputState::WaitingOperatorMotion(Operator::Delete)),
         KeyCode::Char('c') => (EditorCommand::Noop, InputState::WaitingOperatorMotion(Operator::Change)),
-        // q: if recording → stop, else → quit (use :q for quit to avoid conflict)
-        KeyCode::Char('q') => (EditorCommand::Quit, InputState::Ready),
+        // q: stop macro recording if active, otherwise noop.
+        // Use :q or Cmd+Q to quit the editor.
+        KeyCode::Char('q') => (EditorCommand::StopMacroRecord, InputState::Ready),
         // Macro: Q starts recording (shifted to avoid quit conflict)
         KeyCode::Char('Q') => (EditorCommand::Noop, InputState::WaitingMacroRegister),
         KeyCode::Char('@') => (EditorCommand::Noop, InputState::WaitingReplayRegister),

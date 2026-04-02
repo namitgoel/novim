@@ -9,22 +9,25 @@ use winit::event::{ElementState, MouseButton as WinitMouseButton};
 use winit::keyboard::{Key, NamedKey};
 
 /// Convert a winit keyboard event into a crossterm KeyEvent.
+/// Returns `(KeyEvent, is_super)` — `is_super` is true when Cmd/Super was held.
 /// On macOS, Cmd (Super) is mapped to Ctrl so shortcuts work as expected.
 pub fn translate_key(
     logical_key: &Key,
     state: ElementState,
     modifiers: winit::keyboard::ModifiersState,
-) -> Option<KeyEvent> {
+) -> Option<(KeyEvent, bool)> {
     if state != ElementState::Pressed {
         return None;
     }
+
+    let is_super = modifiers.super_key();
 
     let mut mods = KeyModifiers::empty();
     if modifiers.shift_key() {
         mods |= KeyModifiers::SHIFT;
     }
-    // Map both Ctrl and Cmd (Super) to CONTROL so macOS shortcuts work.
-    if modifiers.control_key() || modifiers.super_key() {
+    // Map both Ctrl and Cmd (Super) to CONTROL so shortcuts work.
+    if modifiers.control_key() || is_super {
         mods |= KeyModifiers::CONTROL;
     }
     if modifiers.alt_key() {
@@ -69,7 +72,7 @@ pub fn translate_key(
         _ => return None,
     };
 
-    Some(KeyEvent::new(code, mods))
+    Some((KeyEvent::new(code, mods), is_super))
 }
 
 /// Convert a winit mouse button press/release into a crossterm MouseEvent.

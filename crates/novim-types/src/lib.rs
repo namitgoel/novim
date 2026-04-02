@@ -29,8 +29,9 @@ impl Default for Position {
 }
 
 /// Editor mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum EditorMode {
+    #[default]
     Normal,
     Insert,
     Visual,
@@ -59,11 +60,6 @@ impl EditorMode {
     }
 }
 
-impl Default for EditorMode {
-    fn default() -> Self {
-        EditorMode::Normal
-    }
-}
 
 /// Direction for navigation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
