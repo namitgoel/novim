@@ -85,6 +85,7 @@ pub fn lookup_custom_keybinding(
 }
 
 /// A discrete editor action.
+#[derive(Debug, Clone)]
 pub enum EditorCommand {
     Quit,
     /// Force quit (ignore unsaved changes)
@@ -274,6 +275,7 @@ pub fn key_to_command(
     key: KeyEvent,
     in_terminal: bool,
     popup_showing: bool,
+    gui_mode: bool,
 ) -> (EditorCommand, InputState) {
     // When a popup is showing, Esc/q/? dismiss it, everything else is ignored
     if popup_showing {
@@ -285,10 +287,12 @@ pub fn key_to_command(
         };
     }
 
-    // Ctrl+w always enters pane command mode
+    // Ctrl+w enters pane command mode — but in GUI terminal panes,
+    // Cmd+W handles this, so let Ctrl+W flow to the PTY.
     if input_state == InputState::Ready
         && key.code == KeyCode::Char('w')
         && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !(gui_mode && in_terminal)
     {
         return (EditorCommand::Noop, InputState::WaitingPaneCommand);
     }

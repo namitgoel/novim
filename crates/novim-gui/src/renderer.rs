@@ -9,6 +9,7 @@ use novim_core::config::{self, SyntaxTheme};
 use novim_core::editor::{EditorState, LineNumberMode};
 use novim_core::highlight::HighlightGroup;
 use novim_core::pane::{Pane, PaneContent};
+use novim_core::welcome;
 use novim_types::EditorMode;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
@@ -86,22 +87,6 @@ fn mono_attrs(color: Color) -> Attrs<'static> {
 
 // ── Main render entry ─────────────────────────────────────────────────────────
 
-/// Returns true if the editor is in "pure terminal" mode:
-/// single tab, single terminal pane, no explorer, no overlays.
-fn is_pure_terminal(editor: &EditorState) -> bool {
-    if editor.tabs.len() != 1 { return false; }
-    let ws = &editor.tabs[0];
-    if ws.explorer.is_some() { return false; }
-    if ws.show_buffer_list { return false; }
-    if ws.panes.pane_count() != 1 { return false; }
-    if editor.mode == EditorMode::Command { return false; }
-    if editor.search.active { return false; }
-    if editor.finder.visible { return false; }
-    if editor.show_help { return false; }
-    if editor.show_workspace_list { return false; }
-    ws.panes.focused_pane().content.as_buffer_like().is_terminal()
-}
-
 /// Compose the full editor UI into one or more glyphon TextBuffers and render.
 pub fn render(state: &mut crate::WindowState) {
     let cols = state.gpu.grid_cols() as usize;
@@ -110,171 +95,71 @@ pub fn render(state: &mut crate::WindowState) {
         return;
     }
 
-    // Fast path: pure terminal mode — render directly, no chrome.
-    if is_pure_terminal(&state.editor) {
-        render_terminal_fast(state, cols, rows);
+    // Welcome screen (TUI-only, but keep for safety).
+    if state.editor.show_welcome {
+        render_welcome_screen(state, cols, rows);
         return;
     }
 
-    // Full editor path with all chrome.
     state.editor.focused_buf_mut().reparse_highlights();
-    render_full_editor(state, cols, rows);
+
+    // Dispatch: terminal mode (no chrome) vs editor mode (full chrome)
+    let editor = &state.editor;
+    let ws = &editor.tabs[editor.active_tab];
+    let is_pure_terminal = editor.tabs.len() == 1
+        && editor.mode != EditorMode::Command
+        && !editor.search.active
+        && ws.explorer.is_none()
+        && ws.panes.pane_count() == 1
+        && ws.panes.focused_pane().content.as_buffer_like().is_terminal();
+
+    if is_pure_terminal {
+        render_terminal_mode(state, cols, rows);
+    } else {
+        render_editor_mode(state, cols, rows);
+    }
 }
 
-/// Fast-path renderer for pure terminal mode.
-/// Groups contiguous same-color characters into single spans and uses
-/// `mem::take` to move strings without cloning.
-fn render_terminal_fast(state: &mut crate::WindowState, cols: usize, rows: usize) {
-    let cell_w = state.gpu.cell_width;
-    let cell_h = state.gpu.cell_height;
-    let pane = state.editor.tabs[0].panes.focused_pane();
-    let buf = pane.content.as_buffer_like();
-    let cursor = buf.cursor();
-    let total_lines = buf.len_lines();
+// ── Render paths ─────────────────────────────────────────────────────────────
 
-    let mut rich_spans: Vec<(String, Color)> = Vec::with_capacity(rows * 6);
-    let mut bg_rects: Vec<crate::gpu::BgRect> = Vec::new();
+/// Terminal mode: single terminal pane, full screen, no chrome.
+fn render_terminal_mode(state: &mut crate::WindowState, cols: usize, rows: usize) {
+    adjust_viewports(&mut state.editor, cols, rows);
 
+    let pane_lines = render_pane_area(&state.editor, cols, rows);
+    let mut screen_lines: Vec<Vec<RichSpan>> = Vec::with_capacity(rows);
     for row in 0..rows {
-        if row > 0 {
-            rich_spans.push(("\n".to_string(), FG));
-        }
-        if row < total_lines {
-            let is_cursor_line = row == cursor.line;
-            if let Some(cells) = buf.get_styled_cells(row) {
-                // Convert cells to contiguous spans grouped by color.
-                let mut current_text = String::new();
-                let mut current_color = FG;
-                let mut col_pos = 0usize;
-                let mut first = true;
-
-                for cell in cells {
-                    let (fg_cell, bg_cell) = if cell.attrs.reverse {
-                        (cell.bg, cell.fg)
-                    } else {
-                        (cell.fg, cell.bg)
-                    };
-                    let color = cell_color_to_glyphon(fg_cell);
-
-                    // Collect background rectangles for non-default backgrounds.
-                    if let Some(bg_color) = cell_bg_to_f32(bg_cell) {
-                        bg_rects.push(crate::gpu::BgRect {
-                            x: col_pos as f32 * cell_w,
-                            y: row as f32 * cell_h,
-                            w: cell_w,
-                            h: cell_h,
-                            color: bg_color,
-                        });
-                    }
-
-                    // Cursor: replace the character at cursor position with a block.
-                    if is_cursor_line && col_pos == cursor.column {
-                        // Flush accumulated text
-                        if !current_text.is_empty() {
-                            rich_spans.push((std::mem::take(&mut current_text), current_color));
-                        }
-                        // Draw cursor as a bg rect + original fg text
-                        bg_rects.push(crate::gpu::BgRect {
-                            x: col_pos as f32 * cell_w,
-                            y: row as f32 * cell_h,
-                            w: cell_w,
-                            h: cell_h,
-                            color: [0.78, 0.78, 0.78, 1.0], // CURSOR_BG as f32
-                        });
-                        let ch = if cell.c == ' ' || cell.c == '\0' { ' ' } else { cell.c };
-                        rich_spans.push((ch.to_string(), CURSOR_FG));
-                        current_color = color;
-                        first = true;
-                        col_pos += 1;
-                        continue;
-                    }
-
-                    if first || color.0 != current_color.0 {
-                        if !current_text.is_empty() {
-                            rich_spans.push((std::mem::take(&mut current_text), current_color));
-                        }
-                        current_color = color;
-                        first = false;
-                    }
-                    current_text.push(cell.c);
-                    col_pos += 1;
-                }
-                if !current_text.is_empty() {
-                    rich_spans.push((current_text, current_color));
-                }
-                // Pad to fill row
-                if col_pos < cols {
-                    if is_cursor_line && cursor.column >= col_pos && cursor.column < cols {
-                        let before = cursor.column - col_pos;
-                        if before > 0 {
-                            rich_spans.push((" ".repeat(before), FG));
-                        }
-                        bg_rects.push(crate::gpu::BgRect {
-                            x: cursor.column as f32 * cell_w,
-                            y: row as f32 * cell_h,
-                            w: cell_w,
-                            h: cell_h,
-                            color: [0.78, 0.78, 0.78, 1.0],
-                        });
-                        rich_spans.push((" ".to_string(), CURSOR_FG));
-                        let after = cols - cursor.column - 1;
-                        if after > 0 {
-                            rich_spans.push((" ".repeat(after), FG));
-                        }
-                    } else {
-                        rich_spans.push((" ".repeat(cols - col_pos), FG));
-                    }
-                }
-            } else {
-                // No styled cells — empty line
-                if is_cursor_line && cursor.column < cols {
-                    if cursor.column > 0 {
-                        rich_spans.push((" ".repeat(cursor.column), FG));
-                    }
-                    bg_rects.push(crate::gpu::BgRect {
-                        x: cursor.column as f32 * cell_w,
-                        y: row as f32 * cell_h,
-                        w: cell_w,
-                        h: cell_h,
-                        color: [0.78, 0.78, 0.78, 1.0],
-                    });
-                    rich_spans.push((" ".to_string(), CURSOR_FG));
-                    let after = cols - cursor.column - 1;
-                    if after > 0 {
-                        rich_spans.push((" ".repeat(after), FG));
-                    }
-                } else {
-                    rich_spans.push((" ".repeat(cols), FG));
-                }
-            }
+        if row < pane_lines.len() {
+            screen_lines.push(pane_lines[row].clone());
         } else {
-            // Past terminal grid — just blank
-            rich_spans.push((" ".repeat(cols), FG));
+            screen_lines.push(vec![RichSpan { text: " ".repeat(cols), color: FG }]);
         }
     }
 
-    // Content-hash + render
+    let mut bg_rects: Vec<crate::gpu::BgRect> = Vec::new();
+    apply_popup_overlays(&mut screen_lines, &mut bg_rects, state, cols, rows);
+    let rich_spans = flatten_screen_lines(screen_lines);
     submit_frame(state, &rich_spans, &bg_rects);
 }
 
-/// Full editor renderer with tab bar, status bar, explorer, etc.
-fn render_full_editor(state: &mut crate::WindowState, cols: usize, rows: usize) {
+/// Editor mode: tab bar, status bar, explorer, pane borders.
+fn render_editor_mode(state: &mut crate::WindowState, cols: usize, rows: usize) {
+    adjust_viewports(&mut state.editor, cols, rows);
+
     let editor = &state.editor;
     let has_tabs = editor.tabs.len() > 1;
     let in_command = editor.mode == EditorMode::Command;
     let in_search = editor.search.active;
 
-    // Vertical layout: [tab_bar?] [main_area] [status_bar] [cmd_line?]
+    // Layout: [tab_bar?] [main_area] [status_bar] [cmd_line?]
     let tab_bar_rows = if has_tabs { 1usize } else { 0 };
-    let tab_bar_row = if has_tabs { Some(0) } else { None };
     let bottom_rows = 1 + if in_command || in_search { 1 } else { 0 };
     let main_rows = rows.saturating_sub(tab_bar_rows + bottom_rows);
 
-    // Collect all lines as rich spans
     let mut screen_lines: Vec<Vec<RichSpan>> = Vec::with_capacity(rows);
 
     // Tab bar
-    if tab_bar_row.is_some() {
+    if has_tabs {
         screen_lines.push(render_tab_bar(editor, cols));
     }
 
@@ -283,7 +168,6 @@ fn render_full_editor(state: &mut crate::WindowState, cols: usize, rows: usize) 
     let explorer_cols = if ws.explorer.is_some() { 30usize.min(cols / 3) } else { 0 };
     let pane_cols = cols.saturating_sub(explorer_cols);
 
-    // Render pane lines into a buffer
     let pane_lines = render_pane_area(editor, pane_cols, main_rows);
     let explorer_lines = if explorer_cols > 0 {
         render_explorer(editor, explorer_cols, main_rows)
@@ -296,24 +180,14 @@ fn render_full_editor(state: &mut crate::WindowState, cols: usize, rows: usize) 
         let mut line = Vec::new();
         if explorer_cols > 0 {
             if row < explorer_lines.len() {
-                line.extend(explorer_lines[row].iter().map(|s| RichSpan {
-                    text: s.text.clone(),
-                    color: s.color,
-                }));
+                line.extend(explorer_lines[row].iter().cloned());
             } else {
-                line.push(RichSpan {
-                    text: " ".repeat(explorer_cols),
-                    color: DIM,
-                });
+                line.push(RichSpan { text: " ".repeat(explorer_cols), color: DIM });
             }
-            // Separator
             line.push(RichSpan { text: "│".to_string(), color: DIM });
         }
         if row < pane_lines.len() {
-            line.extend(pane_lines[row].iter().map(|s| RichSpan {
-                text: s.text.clone(),
-                color: s.color,
-            }));
+            line.extend(pane_lines[row].iter().cloned());
         }
         screen_lines.push(line);
     }
@@ -333,23 +207,40 @@ fn render_full_editor(state: &mut crate::WindowState, cols: usize, rows: usize) 
         screen_lines.push(vec![RichSpan { text: " ".repeat(cols), color: FG }]);
     }
 
-    // ── Popup overlays (drawn on top of base screen) ──
+    // Popup overlays
+    let mut bg_rects: Vec<crate::gpu::BgRect> = Vec::new();
+    apply_popup_overlays(&mut screen_lines, &mut bg_rects, state, cols, rows);
+    let rich_spans = flatten_screen_lines(screen_lines);
+    submit_frame(state, &rich_spans, &bg_rects);
+}
+
+// ── Shared helpers ───────────────────────────────────────────────────────────
+
+/// Apply popup overlays (finder, help, buffer list, workspace list) on top of screen content.
+fn apply_popup_overlays(
+    screen_lines: &mut [Vec<RichSpan>],
+    bg_rects: &mut Vec<crate::gpu::BgRect>,
+    state: &crate::WindowState,
+    cols: usize,
+    rows: usize,
+) {
     let cell_w = state.gpu.cell_width;
     let cell_h = state.gpu.cell_height;
-    let mut bg_rects: Vec<crate::gpu::BgRect> = Vec::new();
     let editor = &state.editor;
 
     if editor.finder.visible {
-        overlay_finder(&mut screen_lines, &mut bg_rects, editor, cols, rows, cell_w, cell_h);
+        overlay_finder(screen_lines, bg_rects, editor, cols, rows, cell_w, cell_h);
     } else if editor.show_help {
-        overlay_help(&mut screen_lines, &mut bg_rects, editor, cols, rows, cell_w, cell_h);
+        overlay_help(screen_lines, bg_rects, editor, cols, rows, cell_w, cell_h);
     } else if editor.tabs[editor.active_tab].show_buffer_list {
-        overlay_buffer_list(&mut screen_lines, &mut bg_rects, editor, cols, rows, cell_w, cell_h);
+        overlay_buffer_list(screen_lines, bg_rects, editor, cols, rows, cell_w, cell_h);
     } else if editor.show_workspace_list {
-        overlay_workspace_list(&mut screen_lines, &mut bg_rects, editor, cols, rows, cell_w, cell_h);
+        overlay_workspace_list(screen_lines, bg_rects, editor, cols, rows, cell_w, cell_h);
     }
+}
 
-    // ── Convert screen_lines to flat rich_spans (consume to avoid cloning) ──
+/// Convert screen lines to flat (text, color) spans for glyphon.
+fn flatten_screen_lines(mut screen_lines: Vec<Vec<RichSpan>>) -> Vec<(String, Color)> {
     let mut rich_spans: Vec<(String, Color)> = Vec::with_capacity(screen_lines.len() * 8);
     for (i, line) in screen_lines.drain(..).enumerate() {
         if i > 0 {
@@ -361,8 +252,7 @@ fn render_full_editor(state: &mut crate::WindowState, cols: usize, rows: usize) 
             }
         }
     }
-
-    submit_frame(state, &rich_spans, &bg_rects);
+    rich_spans
 }
 
 // ── Popup overlay helpers ─────────────────────────────────────────────────────
@@ -414,50 +304,57 @@ fn stamp_line(
     );
 }
 
-/// Build a new line by overlaying text at a given column range.
+/// Build a new line by overlaying text at a given column range,
+/// preserving original span colors for content outside the overlay.
 fn build_line_with_overlay(
-    _existing: &[RichSpan],
+    existing: &[RichSpan],
     col: usize,
     width: usize,
     text: &str,
     fg: Color,
 ) -> Vec<RichSpan> {
-    // Simple approach: just produce spans for the full line.
-    // The bg_rect handles the background color.
     let mut result = Vec::new();
-    if col > 0 {
-        // Recalculate existing content length before the overlay.
-        // For simplicity, pad with spaces (the existing content behind is covered by bg_rect).
-        let mut existing_text = String::new();
-        let mut len = 0;
-        for span in _existing {
-            for ch in span.text.chars() {
-                if ch == '\n' { continue; }
-                if len < col {
-                    existing_text.push(ch);
-                    len += 1;
-                }
-            }
-        }
-        while existing_text.len() < col { existing_text.push(' '); }
-        result.push(RichSpan { text: existing_text, color: FG });
-    }
-    result.push(RichSpan { text: text.to_string(), color: fg });
-    // Remaining content after the overlay
     let end_col = col + width;
-    let mut after_text = String::new();
     let mut pos = 0;
-    for span in _existing {
+
+    // Content before the overlay — preserve original colors
+    for span in existing {
+        let mut chunk = String::new();
         for ch in span.text.chars() {
             if ch == '\n' { continue; }
-            if pos >= end_col {
-                after_text.push(ch);
+            if pos < col {
+                chunk.push(ch);
             }
             pos += 1;
         }
+        if !chunk.is_empty() {
+            result.push(RichSpan { text: chunk, color: span.color });
+        }
+        if pos >= col { break; }
     }
-    if !after_text.is_empty() {
-        result.push(RichSpan { text: after_text, color: FG });
+    // Pad if existing content is shorter than col
+    let before_len: usize = result.iter().map(|s| s.text.chars().count()).sum();
+    if before_len < col {
+        result.push(RichSpan { text: " ".repeat(col - before_len), color: FG });
+    }
+
+    // The overlay itself
+    result.push(RichSpan { text: text.to_string(), color: fg });
+
+    // Content after the overlay — preserve original colors
+    pos = 0;
+    for span in existing {
+        let mut chunk = String::new();
+        for ch in span.text.chars() {
+            if ch == '\n' { continue; }
+            if pos >= end_col {
+                chunk.push(ch);
+            }
+            pos += 1;
+        }
+        if !chunk.is_empty() {
+            result.push(RichSpan { text: chunk, color: span.color });
+        }
     }
     result
 }
@@ -1509,37 +1406,6 @@ fn cell_color_to_glyphon(c: novim_core::emulator::grid::CellColor) -> Color {
     }
 }
 
-/// Convert a CellColor to an [f32; 4] RGBA for the background quad pipeline.
-/// Returns None for Default (no bg rect needed).
-fn cell_bg_to_f32(c: novim_core::emulator::grid::CellColor) -> Option<[f32; 4]> {
-    use novim_core::emulator::grid::CellColor;
-    let (r, g, b) = match c {
-        CellColor::Default => return None,
-        CellColor::Black => (0, 0, 0),
-        CellColor::Red => (224, 108, 117),
-        CellColor::Green => (152, 195, 121),
-        CellColor::Yellow => (229, 192, 123),
-        CellColor::Blue => (97, 175, 239),
-        CellColor::Magenta => (198, 120, 221),
-        CellColor::Cyan => (86, 182, 194),
-        CellColor::White => (220, 220, 220),
-        CellColor::BrightBlack => (128, 128, 128),
-        CellColor::BrightRed => (240, 140, 140),
-        CellColor::BrightGreen => (180, 220, 160),
-        CellColor::BrightYellow => (240, 210, 150),
-        CellColor::BrightBlue => (140, 200, 250),
-        CellColor::BrightMagenta => (220, 160, 240),
-        CellColor::BrightCyan => (130, 210, 220),
-        CellColor::BrightWhite => (255, 255, 255),
-        CellColor::Indexed(idx) => {
-            let Color(rgba) = indexed_256_to_rgb(idx);
-            let bytes = rgba.to_be_bytes();
-            return Some([bytes[0] as f32 / 255.0, bytes[1] as f32 / 255.0, bytes[2] as f32 / 255.0, 1.0]);
-        }
-    };
-    Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0])
-}
-
 // ── Diagnostics ───────────────────────────────────────────────────────────────
 
 fn get_diag_marker(ws: &novim_core::editor::Workspace, pane: &Pane, line_num: usize) -> Option<RichSpan> {
@@ -1651,4 +1517,118 @@ impl Clone for RichSpan {
     fn clone(&self) -> Self {
         RichSpan { text: self.text.clone(), color: self.color }
     }
+}
+
+/// Adjust viewport_offset for all panes so the cursor stays visible.
+/// This mirrors the TUI renderer's scroll logic but runs as a separate pass
+/// since the GUI render functions take immutable references.
+fn adjust_viewports(editor: &mut EditorState, cols: usize, rows: usize) {
+    let has_tabs = editor.tabs.len() > 1;
+    let in_command = editor.mode == EditorMode::Command;
+    let in_search = editor.search.active;
+    let tab_bar_rows = if has_tabs { 1 } else { 0 };
+    let bottom_rows = 1 + if in_command || in_search { 1 } else { 0 };
+    let main_rows = rows.saturating_sub(tab_bar_rows + bottom_rows);
+
+    let idx = editor.active_tab;
+    let ws = &editor.tabs[idx];
+    let explorer_cols = if ws.explorer.is_some() { 30usize.min(cols / 3) } else { 0 };
+    let pane_cols = cols.saturating_sub(explorer_cols);
+
+    let area = novim_types::Rect::new(0, 0, pane_cols as u16, main_rows as u16);
+    let layouts = editor.tabs[idx].panes.layout(area);
+
+    let multi_pane = layouts.len() > 1;
+    for (pane_id, rect) in &layouts {
+        let draw_border = multi_pane;
+        let border_overhead = if draw_border { 2 } else { 0 };
+        let available_height = (rect.height as usize).saturating_sub(border_overhead);
+
+        if let Some(pane) = editor.tabs[idx].panes.get_pane_mut(*pane_id) {
+            let buf = pane.content.as_buffer_like();
+            if buf.is_terminal() {
+                continue;
+            }
+            let cursor = buf.cursor();
+
+            if cursor.line < pane.viewport_offset {
+                pane.viewport_offset = cursor.line;
+            } else if available_height > 0 && cursor.line >= pane.viewport_offset + available_height {
+                pane.viewport_offset = cursor.line.saturating_sub(available_height - 1);
+            }
+        }
+    }
+}
+
+/// Render the welcome/splash screen centered in the GPU window.
+fn render_welcome_screen(state: &mut crate::WindowState, cols: usize, rows: usize) {
+    let wlines = welcome::welcome_lines();
+    let content_height = wlines.len();
+    let start_y = rows.saturating_sub(content_height) / 2;
+    let max_visual = wlines.iter().map(|l| l.text.chars().count()).max().unwrap_or(0);
+
+    let logo_color = Color::rgb(95, 175, 255);   // soft blue
+    let version_color = Color::rgb(120, 120, 120);
+    let key_color = Color::rgb(95, 175, 255);
+    let desc_color = Color::rgb(208, 208, 208);
+
+    let mut screen_lines: Vec<Vec<RichSpan>> = Vec::with_capacity(rows);
+
+    for _ in 0..start_y {
+        screen_lines.push(vec![RichSpan { text: " ".repeat(cols), color: FG }]);
+    }
+
+    for wl in &wlines {
+        let pad = cols / 2 - max_visual.min(cols) / 2;
+        let padding = " ".repeat(pad);
+
+        let line = match wl.kind {
+            "logo" => vec![
+                RichSpan { text: padding, color: FG },
+                RichSpan { text: wl.text.clone(), color: logo_color },
+            ],
+            "version" => vec![
+                RichSpan { text: padding, color: FG },
+                RichSpan { text: wl.text.clone(), color: version_color },
+            ],
+            "shortcut" => {
+                if let Some(pos) = wl.text.find("   ") {
+                    let key_part = &wl.text[..pos];
+                    let desc_part = &wl.text[pos + 3..];
+                    vec![
+                        RichSpan { text: padding, color: FG },
+                        RichSpan { text: key_part.to_string(), color: key_color },
+                        RichSpan { text: format!("   {}", desc_part), color: desc_color },
+                    ]
+                } else {
+                    vec![
+                        RichSpan { text: padding, color: FG },
+                        RichSpan { text: wl.text.clone(), color: desc_color },
+                    ]
+                }
+            }
+            _ => vec![RichSpan { text: padding, color: FG }],
+        };
+        screen_lines.push(line);
+    }
+
+    // Pad to fill screen
+    while screen_lines.len() < rows {
+        screen_lines.push(vec![RichSpan { text: " ".repeat(cols), color: FG }]);
+    }
+
+    // Convert to flat rich_spans
+    let mut rich_spans: Vec<(String, Color)> = Vec::with_capacity(rows * 4);
+    for (i, line) in screen_lines.drain(..).enumerate() {
+        if i > 0 {
+            rich_spans.push(("\n".to_string(), FG));
+        }
+        for span in line {
+            if !span.text.is_empty() {
+                rich_spans.push((span.text, span.color));
+            }
+        }
+    }
+
+    submit_frame(state, &rich_spans, &[]);
 }

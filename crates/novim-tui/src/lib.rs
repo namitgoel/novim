@@ -33,8 +33,16 @@ impl TerminalManager {
         Ok(Self { terminal: init_terminal()?, state: EditorState::new_editor() })
     }
 
+    pub fn with_welcome() -> io::Result<Self> {
+        Ok(Self { terminal: init_terminal()?, state: EditorState::new_welcome() })
+    }
+
     pub fn with_file(path: &str) -> io::Result<Self> {
         Ok(Self { terminal: init_terminal()?, state: EditorState::with_file(path)? })
+    }
+
+    pub fn with_dir(path: &str) -> io::Result<Self> {
+        Ok(Self { terminal: init_terminal()?, state: EditorState::with_dir(path)? })
     }
 
     pub fn with_session(name: &str) -> io::Result<Self> {
@@ -94,6 +102,27 @@ impl TerminalManager {
             if event::poll(std::time::Duration::from_millis(16))? {
                 match event::read()? {
                     Event::Key(key) => {
+                        // Welcome screen: only shortcut keys work, others ignored
+                        if self.state.show_welcome {
+                            let cmd = match key.code {
+                                KeyCode::Char('e') => Some(EditorCommand::SwitchMode(EditorMode::Insert)),
+                                KeyCode::Char('t') => Some(EditorCommand::OpenTerminal),
+                                KeyCode::Char('f') => Some(EditorCommand::OpenFileFinder),
+                                KeyCode::Char('?') => Some(EditorCommand::ToggleHelp),
+                                KeyCode::Char('q') => Some(EditorCommand::Quit),
+                                _ => { continue; } // ignore non-shortcut keys
+                            };
+                            if let Some(cmd) = cmd {
+                                self.state.show_welcome = false;
+                                let size = self.terminal.size()?;
+                                let screen_area = novim_types::Rect::new(0, 0, size.width, size.height);
+                                if self.exec(cmd, screen_area) {
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+
                         // File finder active: route keys to finder
                         if self.state.finder.visible {
                             let cmd = match key.code {
@@ -240,7 +269,7 @@ impl TerminalManager {
                         let (cmd, new_input_state) = if let Some(custom_cmd) = lookup_custom_keybinding(&key, custom_bindings) {
                             (custom_cmd, InputState::Ready)
                         } else {
-                            key_to_command(self.state.mode, self.state.input_state, key, in_terminal, popup_showing)
+                            key_to_command(self.state.mode, self.state.input_state, key, in_terminal, popup_showing, false)
                         };
                         // Handle count accumulation
                         if new_input_state == InputState::AccumulatingCount {

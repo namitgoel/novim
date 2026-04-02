@@ -20,8 +20,12 @@ use novim_tui::TerminalManager;
     about = "A hybrid terminal multiplexer and modal text editor"
 )]
 struct Cli {
-    /// File to open
-    file: Option<String>,
+    /// File or directory to open
+    path: Option<String>,
+
+    /// Enable debug logging to ~/.novim/debug.log
+    #[arg(long)]
+    debug: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -61,14 +65,26 @@ enum ConfigAction {
 fn main() {
     let cli = Cli::parse();
 
+    if cli.debug {
+        init_debug_logger();
+    }
+    log::debug!("novim starting, args: path={:?}", cli.path);
+
     let result = match cli.command {
         Some(Commands::Attach { name }) => run_attach(&name),
         Some(Commands::List) => run_list(),
         Some(Commands::Config { action }) => run_config(action),
         Some(Commands::Completions { shell }) => run_completions(shell),
-        None => match cli.file {
-            Some(ref path) => run_with_file(path),
-            None => run_terminal(),
+        None => match cli.path {
+            Some(ref path) => {
+                let p = std::path::Path::new(path);
+                if p.is_dir() {
+                    run_with_dir(path)
+                } else {
+                    run_with_file(path)
+                }
+            }
+            None => run_welcome(),
         },
     };
 
@@ -78,9 +94,16 @@ fn main() {
     }
 }
 
-/// Open with a shell terminal pane (tmux-like mode).
-fn run_terminal() -> io::Result<()> {
-    let mut tm = TerminalManager::with_terminal()?;
+/// Open the welcome screen (no args).
+fn run_welcome() -> io::Result<()> {
+    let mut tm = TerminalManager::with_welcome()?;
+    tm.run()?;
+    tm.shutdown()
+}
+
+/// Open a directory with explorer sidebar.
+fn run_with_dir(path: &str) -> io::Result<()> {
+    let mut tm = TerminalManager::with_dir(path)?;
     tm.run()?;
     tm.shutdown()
 }
@@ -162,4 +185,24 @@ fn run_completions(shell: Shell) -> io::Result<()> {
     let mut cmd = Cli::command();
     generate(shell, &mut cmd, "novim", &mut io::stdout());
     io::stdout().flush()
+}
+
+/// Initialize debug logger writing to ~/.novim/debug.log.
+/// TUI can't log to stderr (ratatui uses alternate screen), so we use a file.
+fn init_debug_logger() {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let log_dir = std::path::PathBuf::from(&home).join(".novim");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("debug.log");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .expect("Failed to open debug log file");
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Debug)
+        .target(env_logger::Target::Pipe(Box::new(file)))
+        .format_timestamp_millis()
+        .init();
+    log::info!("Debug logging enabled, writing to {}", log_path.display());
 }

@@ -3,6 +3,7 @@
 use novim_core::config;
 use novim_core::emulator::grid::{CellAttrs, CellColor};
 use novim_core::highlight::HighlightGroup;
+use novim_core::welcome;
 use novim_types::EditorMode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -108,30 +109,18 @@ fn apply_cursor_highlight<'a>(line: &str, spans: &[Span<'a>], display_col: usize
 
 /// Render the full editor UI: panes + status bar (+ command line if active).
 /// True when the editor has a single focused terminal pane and no overlays.
-fn is_pure_terminal(state: &EditorState) -> bool {
-    if state.tabs.len() > 1 { return false; }
-    let ws = &state.tabs[state.active_tab];
-    if ws.explorer.is_some() { return false; }
-    if ws.panes.pane_count() != 1 { return false; }
-    if ws.show_buffer_list { return false; }
-    if state.show_help { return false; }
-    if state.show_workspace_list { return false; }
-    if state.mode == EditorMode::Command || state.search.active { return false; }
-    if state.finder.visible { return false; }
-    ws.panes.focused_pane().content.as_buffer_like().is_terminal()
-}
-
 pub fn render(f: &mut ratatui::Frame, state: &mut EditorState) {
     let size = f.area();
     f.render_widget(Clear, size);
 
-    let pure_terminal = is_pure_terminal(state);
-
-    // Pure terminal mode: no chrome, full-screen terminal.
-    if pure_terminal {
-        render_panes(f, size, state, true);
+    // Welcome screen: centered logo + shortcuts, full screen.
+    if state.show_welcome {
+        render_welcome(f, size);
         return;
     }
+
+    // Always render with chrome (status bar, borders, etc.)
+    // Pure terminal mode is disabled — novim always shows its own UI.
 
     let in_command_mode = state.mode == EditorMode::Command;
     let in_search_mode = state.search.active;
@@ -1630,4 +1619,63 @@ fn cell_color_to_ratatui(color: CellColor) -> Option<Color> {
         CellColor::BrightWhite => Some(Color::White),
         CellColor::Indexed(idx) => Some(Color::Indexed(idx)),
     }
+}
+
+/// Render the welcome/splash screen centered on the terminal.
+fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
+    let wlines = welcome::welcome_lines();
+    let content_height = wlines.len();
+    let start_y = area.height.saturating_sub(content_height as u16) / 2;
+
+    let mut lines: Vec<Line> = Vec::new();
+    // Pad top
+    for _ in 0..start_y {
+        lines.push(Line::from(""));
+    }
+
+    for wl in &wlines {
+        let max_visual = wlines.iter().map(|l| l.text.chars().count()).max().unwrap_or(0);
+        let pad = area.width as usize / 2 - max_visual.min(area.width as usize) / 2;
+        let padding = " ".repeat(pad);
+
+        let styled = match wl.kind {
+            "logo" => Span::styled(
+                format!("{}{}", padding, wl.text),
+                Style::default().fg(Color::Indexed(75)).add_modifier(Modifier::BOLD),
+            ),
+            "version" => Span::styled(
+                format!("{}{}", padding, wl.text),
+                Style::default().fg(Color::Indexed(243)),
+            ),
+            "shortcut" => {
+                // Split "  key   description" into two styled spans
+                let text = &wl.text;
+                if let Some(pos) = text.find("   ") {
+                    let key_part = &text[..pos];
+                    let desc_part = &text[pos + 3..];
+                    lines.push(Line::from(vec![
+                        Span::raw(padding.clone()),
+                        Span::styled(
+                            key_part.to_string(),
+                            Style::default().fg(Color::Indexed(75)).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("   {}", desc_part),
+                            Style::default().fg(Color::Indexed(252)),
+                        ),
+                    ]));
+                    continue;
+                }
+                Span::styled(
+                    format!("{}{}", padding, wl.text),
+                    Style::default().fg(Color::Indexed(252)),
+                )
+            }
+            _ => Span::raw(format!("{}{}", padding, wl.text)),
+        };
+        lines.push(Line::from(styled));
+    }
+
+    let paragraph = Paragraph::new(lines);
+    f.render_widget(paragraph, area);
 }

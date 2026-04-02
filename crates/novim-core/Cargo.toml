@@ -38,6 +38,9 @@ regex = { workspace = true }
 # LSP
 lsp-types = { workspace = true }
 
+# Logging
+log = { workspace = true }
+
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }

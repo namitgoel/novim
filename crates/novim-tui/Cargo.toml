@@ -9,6 +9,9 @@ license.workspace = true
 novim-core = { workspace = true }
 novim-types = { workspace = true }
 
+# Logging
+log = { workspace = true }
+
 # TUI rendering
 ratatui = { workspace = true }
 crossterm = { workspace = true }

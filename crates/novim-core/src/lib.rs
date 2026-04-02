@@ -20,3 +20,4 @@ pub mod fold;
 pub mod input;
 pub mod pane;
 pub mod session;
+pub mod welcome;

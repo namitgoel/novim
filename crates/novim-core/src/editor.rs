@@ -343,6 +343,8 @@ pub struct EditorState {
     // Workspace list popup
     pub show_workspace_list: bool,
     pub workspace_list_selected: usize,
+    /// Show the welcome/splash screen (dismissed on first keypress).
+    pub show_welcome: bool,
 }
 
 fn ln_mode_from_config(s: &str) -> LineNumberMode {
@@ -415,6 +417,7 @@ impl EditorState {
             hover_text: None,
             show_workspace_list: false,
             workspace_list_selected: 0,
+            show_welcome: false,
         }
     }
 
@@ -425,11 +428,26 @@ impl EditorState {
         Self::with_config_and_tabs(cfg, registry, vec![ws], 0, None)
     }
 
+    /// Create a new editor state with the welcome screen shown (no terminal pane).
+    pub fn new_welcome() -> Self {
+        let mut state = Self::new_editor();
+        state.show_welcome = true;
+        state
+    }
+
     pub fn with_file(path: &str) -> io::Result<Self> {
         let cfg = config::load_config();
         let registry = Arc::new(LspRegistry::from_config(&cfg));
         let ws = Workspace::with_file("novim", path, Arc::clone(&registry))?;
         Ok(Self::with_config_and_tabs(cfg, registry, vec![ws], 0, None))
+    }
+
+    /// Open a directory: empty editor pane + explorer sidebar.
+    pub fn with_dir(path: &str) -> io::Result<Self> {
+        let mut state = Self::new_editor();
+        state.open_explorer_at(Some(path));
+        state.status_message = Some("Select a file from the explorer".to_string());
+        Ok(state)
     }
 
     pub fn new_terminal(rows: u16, cols: u16) -> io::Result<Self> {
@@ -1015,7 +1033,7 @@ impl EditorState {
                         let in_terminal = self.focused_buf().is_terminal();
                         let popup_showing = self.show_help || self.tabs[self.active_tab].show_buffer_list;
                         let (cmd, new_input_state) =
-                            key_to_command(self.mode, self.input_state, key, in_terminal, popup_showing);
+                            key_to_command(self.mode, self.input_state, key, in_terminal, popup_showing, false);
                         self.input_state = new_input_state;
                         self.execute(cmd, screen_area)?;
                     }
@@ -1324,9 +1342,33 @@ impl EditorState {
         let idx = self.active_tab;
         let rows = (screen_area.height / 2).max(5);
         let cols = screen_area.width.saturating_sub(2);
-        match self.tabs[idx].panes.split_terminal(SplitDirection::Horizontal, rows, cols) {
-            Ok(()) => self.status_message = Some("[Terminal] opened".to_string()),
-            Err(e) => return Err(NovimError::Io(e)),
+
+        // If the only pane is an empty unnamed buffer, replace it instead of splitting
+        let pane = self.tabs[idx].panes.focused_pane();
+        let buf = pane.content.as_buffer_like();
+        let is_terminal = buf.is_terminal();
+        let display_name = buf.display_name();
+        let line_count = buf.len_lines();
+        let pane_count = self.tabs[idx].panes.pane_count();
+        let is_empty_editor = !is_terminal
+            && display_name == "[No Name]"
+            && line_count <= 1
+            && pane_count == 1;
+
+        if is_empty_editor {
+            match crate::emulator::TerminalPane::new(rows, cols) {
+                Ok(term) => {
+                    let pane = self.tabs[idx].panes.focused_pane_mut();
+                    pane.content = PaneContent::Terminal(term);
+                    self.status_message = Some("[Terminal] opened".to_string());
+                }
+                Err(e) => return Err(NovimError::Io(e)),
+            }
+        } else {
+            match self.tabs[idx].panes.split_terminal(SplitDirection::Horizontal, rows, cols) {
+                Ok(()) => self.status_message = Some("[Terminal] opened".to_string()),
+                Err(e) => return Err(NovimError::Io(e)),
+            }
         }
         Ok(ExecOutcome::Continue)
     }

@@ -30,7 +30,7 @@ enum UserEvent {
 }
 
 fn main() {
-    env_logger::init();
+    init_gui_logger();
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("Failed to create event loop");
@@ -102,15 +102,25 @@ impl winit::application::ApplicationHandler<UserEvent> for Application {
         let mut gpu = pollster::block_on(GpuState::new(window.clone()));
 
         let mut editor = if let Some(ref path) = self.file_arg {
-            match EditorState::with_file(path) {
-                Ok(e) => e,
-                Err(e) => {
+            let p = std::path::Path::new(path);
+            if p.is_dir() {
+                EditorState::with_dir(path).unwrap_or_else(|e| {
                     let mut ed = EditorState::new_editor();
-                    ed.status_message = Some(format!("Failed to open {}: {}", path, e));
+                    ed.status_message = Some(format!("Failed to open dir {}: {}", path, e));
                     ed
+                })
+            } else {
+                match EditorState::with_file(path) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let mut ed = EditorState::new_editor();
+                        ed.status_message = Some(format!("Failed to open {}: {}", path, e));
+                        ed
+                    }
                 }
             }
         } else {
+            // GUI acts as a terminal emulator — open terminal directly
             let rows = gpu.grid_rows();
             let cols = gpu.grid_cols();
             EditorState::new_terminal(rows, cols)
@@ -175,8 +185,11 @@ impl winit::application::ApplicationHandler<UserEvent> for Application {
                 {
                     let screen = screen_rect(state);
                     if handle_key(&mut state.editor, key_event, screen, is_super) {
-                        event_loop.exit();
-                        return;
+                        // Instead of closing the GUI, open a fresh terminal
+                        let rows = state.gpu.grid_rows();
+                        let cols = state.gpu.grid_cols();
+                        state.editor = EditorState::new_terminal(rows, cols)
+                            .unwrap_or_else(|_| EditorState::new_editor());
                     }
                     self.needs_redraw = true;
                     state.window.request_redraw();
@@ -475,6 +488,7 @@ fn handle_key(
                 key,
                 in_terminal,
                 popup_showing,
+                true, // gui_mode: Ctrl+W forwards to PTY in terminal panes
             )
         };
 
@@ -531,4 +545,25 @@ fn exec(editor: &mut EditorState, cmd: EditorCommand, screen: novim_types::Rect)
             false
         }
     }
+}
+
+fn init_gui_logger() {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let log_dir = std::path::PathBuf::from(&home).join(".novim");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("gui-debug.log");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .expect("Failed to open GUI debug log file");
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Debug)
+        .filter_module("wgpu", log::LevelFilter::Warn)
+        .filter_module("naga", log::LevelFilter::Warn)
+        .filter_module("winit", log::LevelFilter::Warn)
+        .target(env_logger::Target::Pipe(Box::new(file)))
+        .format_timestamp_millis()
+        .init();
+    log::info!("GUI debug logging enabled: {}", log_path.display());
 }

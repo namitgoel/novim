@@ -15,3 +15,5 @@ novim-core = { workspace = true }
 novim-tui = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
