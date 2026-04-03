@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use mlua::{Lua, Function, Value};
 
-use super::{EditorEvent, Plugin, PluginContext};
+use super::{EditorEvent, Plugin, PluginAction, PluginContext};
 
 /// A single Lua plugin loaded from a `.lua` file.
 pub struct LuaPlugin {
@@ -119,6 +119,260 @@ impl LuaPlugin {
         novim.set("exec", exec_fn)
             .map_err(|e| format!("Failed to set novim.exec: {}", e))?;
 
+        // ── Helper: push a structured action into _action_queue ──
+        let push_action_fn = self.lua.create_function(|lua, action: mlua::Table| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let queue: mlua::Table = match novim.get::<Value>("_action_queue")? {
+                Value::Table(t) => t,
+                _ => {
+                    let t = lua.create_table()?;
+                    novim.set("_action_queue", t.clone())?;
+                    t
+                }
+            };
+            let len = queue.len()?;
+            queue.set(len + 1, action)?;
+            Ok(())
+        }).map_err(|e| format!("Failed to create _push_action: {}", e))?;
+        novim.set("_push_action", push_action_fn)
+            .map_err(|e| format!("Failed to set _push_action: {}", e))?;
+
+        // ── novim.buf — buffer read/write API ──
+        let buf = self.lua.create_table()
+            .map_err(|e| format!("Failed to create buf table: {}", e))?;
+
+        // novim.buf.get_lines(start, end) — read lines from snapshot
+        buf.set("get_lines", self.lua.create_function(|lua, (start, end): (usize, usize)| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let snap: mlua::Table = novim.get("_snapshot")?;
+            let lines: mlua::Table = snap.get("lines")?;
+            let result = lua.create_table()?;
+            let mut idx = 1;
+            for i in start..end {
+                if let Ok(line) = lines.get::<String>(i + 1) {
+                    result.set(idx, line)?;
+                    idx += 1;
+                }
+            }
+            Ok(result)
+        }).map_err(|e| format!("buf.get_lines: {}", e))?)
+            .map_err(|e| format!("set buf.get_lines: {}", e))?;
+
+        // novim.buf.get_text() — full buffer text
+        buf.set("get_text", self.lua.create_function(|lua, ()| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let snap: mlua::Table = novim.get("_snapshot")?;
+            let lines: mlua::Table = snap.get("lines")?;
+            let mut text = String::new();
+            for pair in lines.pairs::<i64, String>() {
+                if let Ok((_, line)) = pair {
+                    text.push_str(&line);
+                    text.push('\n');
+                }
+            }
+            Ok(text)
+        }).map_err(|e| format!("buf.get_text: {}", e))?)
+            .map_err(|e| format!("set buf.get_text: {}", e))?;
+
+        // novim.buf.line_count()
+        buf.set("line_count", self.lua.create_function(|lua, ()| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let snap: mlua::Table = novim.get("_snapshot")?;
+            Ok(snap.get::<usize>("line_count")?)
+        }).map_err(|e| format!("buf.line_count: {}", e))?)
+            .map_err(|e| format!("set buf.line_count: {}", e))?;
+
+        // novim.buf.path()
+        buf.set("path", self.lua.create_function(|lua, ()| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let snap: mlua::Table = novim.get("_snapshot")?;
+            Ok(snap.get::<Option<String>>("path")?)
+        }).map_err(|e| format!("buf.path: {}", e))?)
+            .map_err(|e| format!("set buf.path: {}", e))?;
+
+        // novim.buf.is_dirty()
+        buf.set("is_dirty", self.lua.create_function(|lua, ()| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let snap: mlua::Table = novim.get("_snapshot")?;
+            Ok(snap.get::<bool>("is_dirty")?)
+        }).map_err(|e| format!("buf.is_dirty: {}", e))?)
+            .map_err(|e| format!("set buf.is_dirty: {}", e))?;
+
+        // novim.buf.cursor() — returns {line=N, col=N}
+        buf.set("cursor", self.lua.create_function(|lua, ()| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let snap: mlua::Table = novim.get("_snapshot")?;
+            let result = lua.create_table()?;
+            result.set("line", snap.get::<usize>("cursor_line")?)?;
+            result.set("col", snap.get::<usize>("cursor_col")?)?;
+            Ok(result)
+        }).map_err(|e| format!("buf.cursor: {}", e))?)
+            .map_err(|e| format!("set buf.cursor: {}", e))?;
+
+        // novim.buf.set_lines(start, end, lines) — replace lines
+        buf.set("set_lines", self.lua.create_function(|lua, (start, end, lines): (usize, usize, mlua::Table)| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let push: Function = novim.get("_push_action")?;
+            let action = lua.create_table()?;
+            action.set("type", "set_lines")?;
+            action.set("start", start)?;
+            action.set("end_", end)?;
+            action.set("lines", lines)?;
+            push.call::<()>(action)?;
+            Ok(())
+        }).map_err(|e| format!("buf.set_lines: {}", e))?)
+            .map_err(|e| format!("set buf.set_lines: {}", e))?;
+
+        // novim.buf.insert(line, col, text) — insert text at position
+        buf.set("insert", self.lua.create_function(|lua, (line, col, text): (usize, usize, String)| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let push: Function = novim.get("_push_action")?;
+            let action = lua.create_table()?;
+            action.set("type", "insert_text")?;
+            action.set("line", line)?;
+            action.set("col", col)?;
+            action.set("text", text)?;
+            push.call::<()>(action)?;
+            Ok(())
+        }).map_err(|e| format!("buf.insert: {}", e))?)
+            .map_err(|e| format!("set buf.insert: {}", e))?;
+
+        // novim.buf.set_cursor(line, col) — move cursor
+        buf.set("set_cursor", self.lua.create_function(|lua, (line, col): (usize, usize)| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let push: Function = novim.get("_push_action")?;
+            let action = lua.create_table()?;
+            action.set("type", "set_cursor")?;
+            action.set("line", line)?;
+            action.set("col", col)?;
+            push.call::<()>(action)?;
+            Ok(())
+        }).map_err(|e| format!("buf.set_cursor: {}", e))?)
+            .map_err(|e| format!("set buf.set_cursor: {}", e))?;
+
+        novim.set("buf", buf)
+            .map_err(|e| format!("Failed to set novim.buf: {}", e))?;
+
+        // ── novim.fn — shell, filesystem utilities ──
+        let fns = self.lua.create_table()
+            .map_err(|e| format!("Failed to create fn table: {}", e))?;
+
+        // novim.fn.shell(cmd) — run shell command, return stdout
+        fns.set("shell", self.lua.create_function(|_lua, cmd: String| {
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .output()
+                .map_err(|e| mlua::Error::runtime(format!("shell error: {}", e)))?;
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        }).map_err(|e| format!("fn.shell: {}", e))?)
+            .map_err(|e| format!("set fn.shell: {}", e))?;
+
+        // novim.fn.readfile(path) — read file, return lines as table
+        fns.set("readfile", self.lua.create_function(|lua, path: String| {
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| mlua::Error::runtime(format!("readfile error: {}", e)))?;
+            let result = lua.create_table()?;
+            for (i, line) in content.lines().enumerate() {
+                result.set(i + 1, line)?;
+            }
+            Ok(result)
+        }).map_err(|e| format!("fn.readfile: {}", e))?)
+            .map_err(|e| format!("set fn.readfile: {}", e))?;
+
+        // novim.fn.writefile(path, lines) — write lines to file
+        fns.set("writefile", self.lua.create_function(|_lua, (path, lines): (String, mlua::Table)| {
+            let mut content = String::new();
+            for pair in lines.pairs::<i64, String>() {
+                if let Ok((_, line)) = pair {
+                    content.push_str(&line);
+                    content.push('\n');
+                }
+            }
+            std::fs::write(&path, &content)
+                .map_err(|e| mlua::Error::runtime(format!("writefile error: {}", e)))?;
+            Ok(())
+        }).map_err(|e| format!("fn.writefile: {}", e))?)
+            .map_err(|e| format!("set fn.writefile: {}", e))?;
+
+        // novim.fn.glob(pattern) — return matching file paths
+        fns.set("glob", self.lua.create_function(|lua, pattern: String| {
+            let result = lua.create_table()?;
+            let mut idx = 1;
+            if let Ok(entries) = glob::glob(&pattern) {
+                for entry in entries.flatten() {
+                    result.set(idx, entry.to_string_lossy().to_string())?;
+                    idx += 1;
+                }
+            }
+            Ok(result)
+        }).map_err(|e| format!("fn.glob: {}", e))?)
+            .map_err(|e| format!("set fn.glob: {}", e))?;
+
+        novim.set("fn", fns)
+            .map_err(|e| format!("Failed to set novim.fn: {}", e))?;
+
+        // ── novim.ui — status/notification API ──
+        let ui = self.lua.create_table()
+            .map_err(|e| format!("Failed to create ui table: {}", e))?;
+
+        // novim.ui.status(msg) — set status bar message
+        ui.set("status", self.lua.create_function(|lua, msg: String| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let push: Function = novim.get("_push_action")?;
+            let action = lua.create_table()?;
+            action.set("type", "set_status")?;
+            action.set("msg", msg)?;
+            push.call::<()>(action)?;
+            Ok(())
+        }).map_err(|e| format!("ui.status: {}", e))?)
+            .map_err(|e| format!("set ui.status: {}", e))?;
+
+        // novim.ui.log(msg) — write to debug log
+        ui.set("log", self.lua.create_function(|_lua, msg: String| {
+            log::info!("[lua] {}", msg);
+            Ok(())
+        }).map_err(|e| format!("ui.log: {}", e))?)
+            .map_err(|e| format!("set ui.log: {}", e))?;
+
+        novim.set("ui", ui)
+            .map_err(|e| format!("Failed to set novim.ui: {}", e))?;
+
+        // ── novim.keymap(mode, key, action) — register a keybinding ──
+        // action can be a string (ex-command) or a function (Lua callback)
+        let keymap_callbacks = self.lua.create_table()
+            .map_err(|e| format!("Failed to create keymap_callbacks: {}", e))?;
+        novim.set("_keymap_callbacks", keymap_callbacks)
+            .map_err(|e| format!("Failed to set _keymap_callbacks: {}", e))?;
+
+        let keymap_fn = self.lua.create_function(|lua, (mode, key, action): (String, String, Value)| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let push: Function = novim.get("_push_action")?;
+            let tbl = lua.create_table()?;
+            tbl.set("type", "register_keymap")?;
+            tbl.set("mode", mode)?;
+            tbl.set("key", key.clone())?;
+
+            match action {
+                Value::String(cmd) => {
+                    tbl.set("action_type", "command")?;
+                    tbl.set("command", cmd.to_str()?.to_string())?;
+                }
+                Value::Function(f) => {
+                    // Store the callback in _keymap_callbacks[key]
+                    let callbacks: mlua::Table = novim.get("_keymap_callbacks")?;
+                    callbacks.set(key.as_str(), f)?;
+                    tbl.set("action_type", "lua_callback")?;
+                    tbl.set("callback_key", key)?;
+                }
+                _ => return Err(mlua::Error::runtime("keymap action must be a string or function")),
+            }
+            push.call::<()>(tbl)?;
+            Ok(())
+        }).map_err(|e| format!("Failed to create novim.keymap: {}", e))?;
+        novim.set("keymap", keymap_fn)
+            .map_err(|e| format!("Failed to set novim.keymap: {}", e))?;
+
         // Set global
         self.lua.globals().set("novim", novim)
             .map_err(|e| format!("Failed to set global novim: {}", e))?;
@@ -134,28 +388,127 @@ impl LuaPlugin {
         Ok(())
     }
 
-    /// Drain the command queue that Lua scripts populate via `novim.exec()`.
-    fn drain_cmd_queue(&self) -> Vec<String> {
-        let mut cmds = Vec::new();
-        let Ok(novim) = self.lua.globals().get::<mlua::Table>("novim") else { return cmds };
-        let Ok(Value::Table(queue)) = novim.get::<Value>("_cmd_queue") else { return cmds };
+    /// Drain all queued actions (exec commands + structured actions).
+    fn drain_actions(&self) -> Vec<PluginAction> {
+        let mut actions = Vec::new();
+        let Ok(novim) = self.lua.globals().get::<mlua::Table>("novim") else { return actions };
 
-        for pair in queue.clone().pairs::<i64, String>() {
-            if let Ok((_, cmd)) = pair {
-                cmds.push(cmd);
+        // Drain exec command queue
+        if let Ok(Value::Table(queue)) = novim.get::<Value>("_cmd_queue") {
+            for pair in queue.clone().pairs::<i64, String>() {
+                if let Ok((_, cmd)) = pair {
+                    actions.push(PluginAction::ExecCommand(cmd));
+                }
+            }
+            if let Ok(fresh) = self.lua.create_table() {
+                let _ = novim.set("_cmd_queue", fresh);
             }
         }
 
-        // Clear the queue
-        if let Ok(fresh) = self.lua.create_table() {
-            let _ = novim.set("_cmd_queue", fresh);
+        // Drain structured action queue
+        if let Ok(Value::Table(queue)) = novim.get::<Value>("_action_queue") {
+            for pair in queue.clone().pairs::<i64, mlua::Table>() {
+                if let Ok((_, tbl)) = pair {
+                    if let Some(action) = Self::table_to_action(&tbl) {
+                        actions.push(action);
+                    }
+                }
+            }
+            if let Ok(fresh) = self.lua.create_table() {
+                let _ = novim.set("_action_queue", fresh);
+            }
         }
 
-        cmds
+        actions
+    }
+
+    /// Convert a Lua table from the action queue into a PluginAction.
+    fn table_to_action(tbl: &mlua::Table) -> Option<PluginAction> {
+        let action_type: String = tbl.get("type").ok()?;
+        match action_type.as_str() {
+            "set_lines" => {
+                let start: usize = tbl.get("start").ok()?;
+                let end: usize = tbl.get("end_").ok()?;
+                let lines_tbl: mlua::Table = tbl.get("lines").ok()?;
+                let lines: Vec<String> = lines_tbl.pairs::<i64, String>()
+                    .filter_map(|r| r.ok().map(|(_, v)| v))
+                    .collect();
+                Some(PluginAction::SetLines { start, end, lines })
+            }
+            "insert_text" => {
+                let line: usize = tbl.get("line").ok()?;
+                let col: usize = tbl.get("col").ok()?;
+                let text: String = tbl.get("text").ok()?;
+                Some(PluginAction::InsertText { line, col, text })
+            }
+            "set_cursor" => {
+                let line: usize = tbl.get("line").ok()?;
+                let col: usize = tbl.get("col").ok()?;
+                Some(PluginAction::SetCursor { line, col })
+            }
+            "set_status" => {
+                let msg: String = tbl.get("msg").ok()?;
+                Some(PluginAction::SetStatus(msg))
+            }
+            "register_keymap" => {
+                let mode: String = tbl.get("mode").ok()?;
+                let key: String = tbl.get("key").ok()?;
+                let action_type: String = tbl.get("action_type").ok()?;
+                let action = match action_type.as_str() {
+                    "command" => {
+                        let cmd: String = tbl.get("command").ok()?;
+                        super::KeymapAction::Command(cmd)
+                    }
+                    "lua_callback" => {
+                        let callback_key: String = tbl.get("callback_key").ok()?;
+                        super::KeymapAction::LuaCallback {
+                            plugin_id: String::new(), // filled by manager
+                            callback_key,
+                        }
+                    }
+                    _ => return None,
+                };
+                Some(PluginAction::RegisterKeymap { mode, key, action })
+            }
+            _ => None,
+        }
+    }
+
+    /// Inject the buffer snapshot into the Lua `novim._snapshot` table.
+    fn inject_snapshot(&self, ctx: &PluginContext) {
+        let Ok(novim) = self.lua.globals().get::<mlua::Table>("novim") else { return };
+        let Ok(snap) = self.lua.create_table() else { return };
+
+        // Lines as a Lua table
+        let Ok(lines_tbl) = self.lua.create_table() else { return };
+        for (i, line) in ctx.buf.lines.iter().enumerate() {
+            let _ = lines_tbl.set(i + 1, line.as_str());
+        }
+        let _ = snap.set("lines", lines_tbl);
+        let _ = snap.set("line_count", ctx.buf.line_count);
+        let _ = snap.set("cursor_line", ctx.buf.cursor_line);
+        let _ = snap.set("cursor_col", ctx.buf.cursor_col);
+        let _ = snap.set("is_dirty", ctx.buf.is_dirty);
+        let _ = snap.set("mode", ctx.buf.mode.as_str());
+        if let Some(path) = &ctx.buf.path {
+            let _ = snap.set("path", path.as_str());
+        }
+        if let Some((sl, sc, el, ec)) = ctx.buf.selection {
+            let Ok(sel) = self.lua.create_table() else { return };
+            let _ = sel.set("start_line", sl);
+            let _ = sel.set("start_col", sc);
+            let _ = sel.set("end_line", el);
+            let _ = sel.set("end_col", ec);
+            let _ = snap.set("selection", sel);
+        }
+
+        let _ = novim.set("_snapshot", snap);
     }
 
     /// Call all Lua handlers registered for `event_name`, passing event data as args.
-    fn call_handlers(&self, event_name: &str, args: &HashMap<String, String>) -> Vec<String> {
+    fn call_handlers(&self, event_name: &str, args: &HashMap<String, String>, ctx: &PluginContext) -> Vec<PluginAction> {
+        // Inject snapshot before calling handlers
+        self.inject_snapshot(ctx);
         let Ok(novim) = self.lua.globals().get::<mlua::Table>("novim") else { return vec![] };
         let Ok(handlers) = novim.get::<mlua::Table>("_handlers") else { return vec![] };
         let Ok(Value::Table(list)) = handlers.get::<Value>(event_name) else { return vec![] };
@@ -174,7 +527,12 @@ impl LuaPlugin {
             }
         }
 
-        self.drain_cmd_queue()
+        self.drain_actions()
+    }
+
+    /// Drain actions queued during init (e.g. keymap registrations).
+    pub fn drain_init_actions(&self) -> Vec<PluginAction> {
+        self.drain_actions()
     }
 
     /// Get the list of command names this plugin registered.
@@ -202,7 +560,7 @@ impl Plugin for LuaPlugin {
         }
     }
 
-    fn on_event(&mut self, event: &EditorEvent, _ctx: &PluginContext) -> Vec<String> {
+    fn on_event(&mut self, event: &EditorEvent, ctx: &PluginContext) -> Vec<PluginAction> {
         let (event_name, args) = match event {
             EditorEvent::BufOpen { path } => ("BufOpen", HashMap::from([("path".into(), path.clone())])),
             EditorEvent::BufEnter { path } => ("BufEnter", HashMap::from([("path".into(), path.clone())])),
@@ -219,25 +577,42 @@ impl Plugin for LuaPlugin {
                 ("to".into(), to.clone()),
             ])),
             EditorEvent::CommandExecuted { command } => {
-                // Check if this is a plugin-registered command
-                let (cmd_name, cmd_args) = command.split_once(' ').unwrap_or((command, ""));
                 let Ok(novim) = self.lua.globals().get::<mlua::Table>("novim") else {
                     return vec![];
                 };
+
+                // Handle keymap callbacks: __keymap:<key>
+                if let Some(callback_key) = command.strip_prefix("__keymap:") {
+                    let Ok(callbacks) = novim.get::<mlua::Table>("_keymap_callbacks") else {
+                        return vec![];
+                    };
+                    if let Ok(handler) = callbacks.get::<Function>(callback_key) {
+                        self.inject_snapshot(ctx);
+                        if let Err(e) = handler.call::<()>(()) {
+                            log::warn!("Lua keymap callback error in {} for {}: {}", self.id, callback_key, e);
+                        }
+                        return self.drain_actions();
+                    }
+                    return vec![];
+                }
+
+                // Handle registered commands
+                let (cmd_name, cmd_args) = command.split_once(' ').unwrap_or((command, ""));
                 let Ok(commands) = novim.get::<mlua::Table>("_commands") else {
                     return vec![];
                 };
                 if let Ok(handler) = commands.get::<Function>(cmd_name) {
+                    self.inject_snapshot(ctx);
                     if let Err(e) = handler.call::<()>(cmd_args.to_string()) {
                         log::warn!("Lua command error in {} for :{}: {}", self.id, cmd_name, e);
                     }
-                    return self.drain_cmd_queue();
+                    return self.drain_actions();
                 }
                 ("CommandExecuted", HashMap::from([("command".into(), command.clone())]))
             }
         };
 
-        self.call_handlers(event_name, &args)
+        self.call_handlers(event_name, &args, ctx)
     }
 }
 
@@ -256,6 +631,13 @@ mod tests {
         LuaPlugin::from_file(&path).unwrap()
     }
 
+    fn assert_exec_commands(actions: &[PluginAction], expected: &[&str]) {
+        let cmds: Vec<&str> = actions.iter().filter_map(|a| {
+            if let PluginAction::ExecCommand(s) = a { Some(s.as_str()) } else { None }
+        }).collect();
+        assert_eq!(cmds, expected);
+    }
+
     #[test]
     fn lua_plugin_event_handler() {
         let mut plugin = lua_plugin_from_source("test_on", r#"
@@ -267,18 +649,17 @@ mod tests {
         let mut ctx = PluginContext::new(false);
         plugin.init(&mut ctx);
 
-        let cmds = plugin.on_event(
+        let actions = plugin.on_event(
             &EditorEvent::BufWrite { path: "main.rs".into() },
             &PluginContext::new(false),
         );
-        assert_eq!(cmds, vec!["set wrap"]);
+        assert_exec_commands(&actions, &["set wrap"]);
 
-        // Other events should produce no commands
-        let cmds = plugin.on_event(
+        let actions = plugin.on_event(
             &EditorEvent::BufOpen { path: "main.rs".into() },
             &PluginContext::new(false),
         );
-        assert!(cmds.is_empty());
+        assert!(actions.is_empty());
     }
 
     #[test]
@@ -295,12 +676,11 @@ mod tests {
         let names = plugin.registered_commands();
         assert_eq!(names, vec!["Hello"]);
 
-        // Trigger via CommandExecuted with the command name
-        let cmds = plugin.on_event(
+        let actions = plugin.on_event(
             &EditorEvent::CommandExecuted { command: "Hello".into() },
             &PluginContext::new(false),
         );
-        assert_eq!(cmds, vec!["set nowrap"]);
+        assert_exec_commands(&actions, &["set nowrap"]);
     }
 
     #[test]
@@ -317,11 +697,11 @@ mod tests {
         let mut ctx = PluginContext::new(false);
         plugin.init(&mut ctx);
 
-        let cmds = plugin.on_event(
+        let actions = plugin.on_event(
             &EditorEvent::BufOpen { path: "test.rs".into() },
             &PluginContext::new(false),
         );
-        assert_eq!(cmds, vec!["set wrap", "set rnu"]);
+        assert_exec_commands(&actions, &["set wrap", "set rnu"]);
     }
 
     #[test]
@@ -340,5 +720,148 @@ mod tests {
         let plugin = lua_plugin_from_source("auto_save", "-- empty plugin");
         assert_eq!(plugin.id(), "user.auto_save");
         assert_eq!(plugin.name(), "auto save");
+    }
+
+    fn ctx_with_snapshot() -> PluginContext {
+        let mut ctx = PluginContext::new(false);
+        ctx.buf = super::super::BufferSnapshot {
+            lines: vec!["hello world".into(), "second line".into(), "third line".into()],
+            line_count: 3,
+            cursor_line: 0,
+            cursor_col: 5,
+            path: Some("test.rs".into()),
+            is_dirty: false,
+            mode: "NORMAL".into(),
+            selection: None,
+        };
+        ctx
+    }
+
+    #[test]
+    fn lua_buf_read_api() {
+        let mut plugin = lua_plugin_from_source("test_buf_read", r#"
+            novim.on("BufOpen", function(args)
+                local count = novim.buf.line_count()
+                local path = novim.buf.path()
+                local dirty = novim.buf.is_dirty()
+                local cur = novim.buf.cursor()
+                novim.exec("echo lines=" .. count .. " path=" .. path .. " dirty=" .. tostring(dirty) .. " cur=" .. cur.line .. "," .. cur.col)
+            end)
+        "#);
+
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        let ctx = ctx_with_snapshot();
+        let actions = plugin.on_event(
+            &EditorEvent::BufOpen { path: "test.rs".into() },
+            &ctx,
+        );
+        assert_exec_commands(&actions, &["echo lines=3 path=test.rs dirty=false cur=0,5"]);
+    }
+
+    #[test]
+    fn lua_buf_get_lines() {
+        let mut plugin = lua_plugin_from_source("test_get_lines", r#"
+            novim.on("BufOpen", function(args)
+                local lines = novim.buf.get_lines(0, 2)
+                novim.exec("echo " .. lines[1] .. "|" .. lines[2])
+            end)
+        "#);
+
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        let ctx = ctx_with_snapshot();
+        let actions = plugin.on_event(
+            &EditorEvent::BufOpen { path: "test.rs".into() },
+            &ctx,
+        );
+        assert_exec_commands(&actions, &["echo hello world|second line"]);
+    }
+
+    #[test]
+    fn lua_buf_write_api() {
+        let mut plugin = lua_plugin_from_source("test_buf_write", r#"
+            novim.on("BufWrite", function(args)
+                novim.buf.set_cursor(2, 0)
+                novim.buf.insert(1, 0, "inserted")
+            end)
+        "#);
+
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        let ctx = ctx_with_snapshot();
+        let actions = plugin.on_event(
+            &EditorEvent::BufWrite { path: "test.rs".into() },
+            &ctx,
+        );
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(&actions[0], PluginAction::SetCursor { line: 2, col: 0 }));
+        assert!(matches!(&actions[1], PluginAction::InsertText { line: 1, col: 0, text } if text == "inserted"));
+    }
+
+    #[test]
+    fn lua_ui_status() {
+        let mut plugin = lua_plugin_from_source("test_ui", r#"
+            novim.on("BufOpen", function(args)
+                novim.ui.status("Hello from UI!")
+            end)
+        "#);
+
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        let ctx = ctx_with_snapshot();
+        let actions = plugin.on_event(
+            &EditorEvent::BufOpen { path: "test.rs".into() },
+            &ctx,
+        );
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(&actions[0], PluginAction::SetStatus(msg) if msg == "Hello from UI!"));
+    }
+
+    #[test]
+    fn lua_shell_api() {
+        let mut plugin = lua_plugin_from_source("test_shell", r#"
+            novim.on("BufOpen", function(args)
+                local result = novim.fn.shell("echo hello")
+                novim.exec("echo " .. result:gsub("\n", ""))
+            end)
+        "#);
+
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        let ctx = ctx_with_snapshot();
+        let actions = plugin.on_event(
+            &EditorEvent::BufOpen { path: "test.rs".into() },
+            &ctx,
+        );
+        assert_exec_commands(&actions, &["echo hello"]);
+    }
+
+    #[test]
+    fn lua_file_api() {
+        let tmp = std::env::temp_dir().join("novim_test_file_api.txt");
+        let mut plugin = lua_plugin_from_source("test_file", &format!(r#"
+            novim.on("BufOpen", function(args)
+                novim.fn.writefile("{path}", {{"line one", "line two"}})
+                local lines = novim.fn.readfile("{path}")
+                novim.exec("echo " .. lines[1] .. "|" .. lines[2])
+            end)
+        "#, path = tmp.display()));
+
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        let ctx = ctx_with_snapshot();
+        let actions = plugin.on_event(
+            &EditorEvent::BufOpen { path: "test.rs".into() },
+            &ctx,
+        );
+        assert_exec_commands(&actions, &["echo line one|line two"]);
+        let _ = std::fs::remove_file(&tmp);
     }
 }

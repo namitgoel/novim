@@ -15,7 +15,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::{self, Stdout};
 
 use novim_core::editor::ExecOutcome;
-use novim_core::input::{key_to_command, lookup_custom_keybinding, EditorCommand, InputState};
+use novim_core::input::{key_to_command, key_to_string, lookup_custom_keybinding, EditorCommand, InputState};
 
 // Re-export editor types so renderer and downstream crates can use them.
 pub use novim_core::editor::{
@@ -263,7 +263,19 @@ impl TerminalManager {
                         }
                         let popup_showing = self.state.show_help || self.state.tabs[self.state.active_tab].show_buffer_list || self.state.show_workspace_list;
 
-                        // Check custom keybindings first (config override)
+                        // Check plugin keymaps first (before borrowing config)
+                        let key_str = key_to_string(&key);
+                        let mode_str = self.state.mode.display_name();
+                        if !key_str.is_empty() {
+                            let size = self.terminal.size()?;
+                            let screen_area = novim_types::Rect::new(0, 0, size.width, size.height);
+                            if self.state.try_plugin_keymap(mode_str, &key_str, screen_area) {
+                                self.state.input_state = InputState::Ready;
+                                continue;
+                            }
+                        }
+
+                        // Check custom keybindings (config override)
                         let custom_bindings = match self.state.mode {
                             EditorMode::Normal => &self.state.config.keybindings.normal,
                             EditorMode::Insert => &self.state.config.keybindings.insert,

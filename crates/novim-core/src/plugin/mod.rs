@@ -7,6 +7,7 @@ pub mod lua_bridge;
 pub mod manager;
 pub mod registry;
 
+use std::collections::HashMap;
 use std::fmt;
 
 /// Errors that can occur during plugin operations.
@@ -32,31 +33,98 @@ impl fmt::Display for PluginError {
 
 impl std::error::Error for PluginError {}
 
-/// The core trait that all Novim plugins implement.
-///
-/// Built-in plugins (git_signs, lsp, syntax, etc.) implement this in Rust.
-/// User plugins implement it via the Lua bridge.
-pub trait Plugin: Send {
-    /// Unique identifier (e.g. "git_signs", "user.auto_save").
-    fn id(&self) -> &str;
+// ── Snapshot: read-only buffer state passed to plugins ──
 
-    /// Human-readable name (e.g. "Git Signs").
-    fn name(&self) -> &str;
+/// Read-only snapshot of the focused buffer, populated before event dispatch.
+#[derive(Debug, Clone, Default)]
+pub struct BufferSnapshot {
+    pub lines: Vec<String>,
+    pub line_count: usize,
+    pub cursor_line: usize,
+    pub cursor_col: usize,
+    pub path: Option<String>,
+    pub is_dirty: bool,
+    pub mode: String,
+    pub selection: Option<(usize, usize, usize, usize)>,
+}
 
-    /// Called once when the plugin is loaded.
-    fn init(&mut self, ctx: &mut PluginContext);
+// ── PluginAction: structured mutations plugins can request ──
 
-    /// Called when the plugin is unloaded.
-    fn shutdown(&mut self) {}
+/// Actions plugins can return. Replaces the old `Vec<String>` return type.
+#[derive(Debug, Clone)]
+pub enum PluginAction {
+    /// Execute an ex-command string (e.g. "set wrap", "echo hello").
+    ExecCommand(String),
+    /// Replace lines[start..end] with new lines.
+    SetLines { start: usize, end: usize, lines: Vec<String> },
+    /// Insert text at a position.
+    InsertText { line: usize, col: usize, text: String },
+    /// Move the cursor.
+    SetCursor { line: usize, col: usize },
+    /// Set the status bar message.
+    SetStatus(String),
+    /// Register a keybinding at runtime.
+    RegisterKeymap { mode: String, key: String, action: KeymapAction },
+}
 
-    /// Called when an editor event fires. Returns commands to execute.
-    fn on_event(&mut self, event: &EditorEvent, ctx: &PluginContext) -> Vec<String>;
+/// What happens when a plugin-registered key is pressed.
+#[derive(Debug, Clone)]
+pub enum KeymapAction {
+    /// Execute an ex-command string.
+    Command(String),
+    /// Call a Lua function (plugin_id + callback key for lookup).
+    LuaCallback { plugin_id: String, callback_key: String },
+}
 
-    /// Whether this is a built-in plugin (cannot be uninstalled).
-    fn is_builtin(&self) -> bool {
-        false
+// ── Keymap Registry ──
+
+/// Stores keymaps registered by plugins at runtime.
+pub struct KeymapRegistry {
+    /// (mode, key_string) → action
+    keymaps: HashMap<(String, String), KeymapEntry>,
+}
+
+pub struct KeymapEntry {
+    pub plugin_id: String,
+    pub action: KeymapAction,
+}
+
+impl KeymapRegistry {
+    pub fn new() -> Self {
+        Self { keymaps: HashMap::new() }
+    }
+
+    pub fn register(&mut self, mode: &str, key: &str, plugin_id: &str, action: KeymapAction) {
+        self.keymaps.insert(
+            (mode.to_string(), key.to_string()),
+            KeymapEntry { plugin_id: plugin_id.to_string(), action },
+        );
+    }
+
+    /// Look up a keymap for the given mode and key string.
+    pub fn lookup(&self, mode: &str, key: &str) -> Option<&KeymapEntry> {
+        self.keymaps.get(&(mode.to_string(), key.to_string()))
     }
 }
+
+impl Default for KeymapRegistry {
+    fn default() -> Self { Self::new() }
+}
+
+// ── Plugin trait ──
+
+/// The core trait that all Novim plugins implement.
+pub trait Plugin: Send {
+    fn id(&self) -> &str;
+    fn name(&self) -> &str;
+    fn init(&mut self, ctx: &mut PluginContext);
+    fn shutdown(&mut self) {}
+    /// Called when an editor event fires. Returns actions to execute.
+    fn on_event(&mut self, event: &EditorEvent, ctx: &PluginContext) -> Vec<PluginAction>;
+    fn is_builtin(&self) -> bool { false }
+}
+
+// ── Events ──
 
 /// Events emitted by the editor that plugins can subscribe to.
 #[derive(Debug, Clone)]
@@ -72,36 +140,25 @@ pub enum EditorEvent {
     CommandExecuted { command: String },
 }
 
+// ── PluginContext ──
+
 /// Restricted API surface that plugins receive to interact with the editor.
-///
-/// Plugins cannot hold &mut EditorState directly — they go through this context
-/// which queues commands for the host to apply between frames.
 pub struct PluginContext {
-    /// Commands queued by plugins, applied by the host after event dispatch.
-    pub queued_commands: Vec<String>,
     /// Plugin-specific configuration from config.toml `[plugins.<id>]`.
-    pub config: std::collections::HashMap<String, toml::Value>,
+    pub config: HashMap<String, toml::Value>,
     /// Whether the current frontend is a GUI.
     pub is_gui: bool,
+    /// Snapshot of the focused buffer (populated before dispatch).
+    pub buf: BufferSnapshot,
 }
 
 impl PluginContext {
     pub fn new(is_gui: bool) -> Self {
         Self {
-            queued_commands: Vec::new(),
-            config: std::collections::HashMap::new(),
+            config: HashMap::new(),
             is_gui,
+            buf: BufferSnapshot::default(),
         }
-    }
-
-    /// Queue a command for execution after the current event dispatch.
-    pub fn exec(&mut self, command: impl Into<String>) {
-        self.queued_commands.push(command.into());
-    }
-
-    /// Drain all queued commands.
-    pub fn take_commands(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.queued_commands)
     }
 }
 
@@ -109,36 +166,29 @@ impl PluginContext {
 mod tests {
     use super::*;
     use super::manager::PluginManager;
-    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    /// A test plugin that logs events it receives and responds to BufWrite
-    /// by returning a status command.
     struct TestPlugin {
         events: Arc<Mutex<Vec<String>>>,
-        initialized: bool,
         was_shutdown: Arc<Mutex<bool>>,
     }
 
     impl TestPlugin {
         fn new(events: Arc<Mutex<Vec<String>>>, was_shutdown: Arc<Mutex<bool>>) -> Self {
-            Self { events, initialized: false, was_shutdown }
+            Self { events, was_shutdown }
         }
     }
 
     impl Plugin for TestPlugin {
         fn id(&self) -> &str { "test_plugin" }
         fn name(&self) -> &str { "Test Plugin" }
-
-        fn init(&mut self, _ctx: &mut PluginContext) {
-            self.initialized = true;
-        }
+        fn init(&mut self, _ctx: &mut PluginContext) {}
 
         fn shutdown(&mut self) {
             *self.was_shutdown.lock().unwrap() = true;
         }
 
-        fn on_event(&mut self, event: &EditorEvent, _ctx: &PluginContext) -> Vec<String> {
+        fn on_event(&mut self, event: &EditorEvent, _ctx: &PluginContext) -> Vec<PluginAction> {
             let label = match event {
                 EditorEvent::BufOpen { path } => format!("BufOpen:{}", path),
                 EditorEvent::BufWrite { path } => format!("BufWrite:{}", path),
@@ -152,6 +202,8 @@ mod tests {
         }
     }
 
+    fn snap() -> BufferSnapshot { BufferSnapshot::default() }
+
     #[test]
     fn plugin_lifecycle() {
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -161,16 +213,14 @@ mod tests {
         let mut manager = PluginManager::new(false, HashMap::new());
         manager.add(Box::new(plugin)).unwrap();
 
-        // Should be listed as enabled
         let list = manager.list();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0], ("test_plugin", "Test Plugin", true, false));
 
-        // Dispatch events
-        manager.dispatch(&EditorEvent::BufOpen { path: "main.rs".into() });
-        manager.dispatch(&EditorEvent::BufWrite { path: "main.rs".into() });
-        manager.dispatch(&EditorEvent::TextChanged { path: "main.rs".into() });
-        manager.dispatch(&EditorEvent::ModeChanged { from: "NORMAL".into(), to: "INSERT".into() });
+        manager.dispatch(&EditorEvent::BufOpen { path: "main.rs".into() }, &snap());
+        manager.dispatch(&EditorEvent::BufWrite { path: "main.rs".into() }, &snap());
+        manager.dispatch(&EditorEvent::TextChanged { path: "main.rs".into() }, &snap());
+        manager.dispatch(&EditorEvent::ModeChanged { from: "NORMAL".into(), to: "INSERT".into() }, &snap());
 
         let log = events.lock().unwrap();
         assert_eq!(log.len(), 4);
@@ -180,7 +230,6 @@ mod tests {
         assert_eq!(log[3], "ModeChanged:NORMAL>INSERT");
         drop(log);
 
-        // Shutdown
         assert!(!*shutdown.lock().unwrap());
         manager.shutdown_all();
         assert!(*shutdown.lock().unwrap());
@@ -188,15 +237,15 @@ mod tests {
     }
 
     #[test]
-    fn plugin_returns_commands() {
+    fn plugin_returns_actions() {
         struct CmdPlugin;
         impl Plugin for CmdPlugin {
             fn id(&self) -> &str { "cmd_plugin" }
             fn name(&self) -> &str { "Command Plugin" }
             fn init(&mut self, _ctx: &mut PluginContext) {}
-            fn on_event(&mut self, event: &EditorEvent, _ctx: &PluginContext) -> Vec<String> {
+            fn on_event(&mut self, event: &EditorEvent, _ctx: &PluginContext) -> Vec<PluginAction> {
                 if let EditorEvent::BufWrite { .. } = event {
-                    vec!["set wrap".to_string()]
+                    vec![PluginAction::ExecCommand("set wrap".into())]
                 } else {
                     vec![]
                 }
@@ -206,11 +255,12 @@ mod tests {
         let mut manager = PluginManager::new(false, HashMap::new());
         manager.add(Box::new(CmdPlugin)).unwrap();
 
-        let cmds = manager.dispatch(&EditorEvent::BufWrite { path: "test.rs".into() });
-        assert_eq!(cmds, vec!["set wrap"]);
+        let actions = manager.dispatch(&EditorEvent::BufWrite { path: "test.rs".into() }, &snap());
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(&actions[0], PluginAction::ExecCommand(s) if s == "set wrap"));
 
-        let cmds = manager.dispatch(&EditorEvent::BufOpen { path: "test.rs".into() });
-        assert!(cmds.is_empty());
+        let actions = manager.dispatch(&EditorEvent::BufOpen { path: "test.rs".into() }, &snap());
+        assert!(actions.is_empty());
     }
 
     #[test]
@@ -226,20 +276,15 @@ mod tests {
 
         let mut manager = PluginManager::new(false, configs);
         manager.add(Box::new(plugin)).unwrap();
-
-        // Plugin should not be loaded at all
         assert_eq!(manager.list().len(), 0);
     }
 
     #[test]
     fn command_registry_routing() {
         let mut manager = PluginManager::new(false, HashMap::new());
-
-        // Register a command
         manager.registry.register("AutoSave", "auto_save", "Toggle auto-save").unwrap();
         assert!(manager.has_command("AutoSave"));
         assert!(!manager.has_command("DoesNotExist"));
-
         assert_eq!(manager.command_owner("AutoSave"), Some("auto_save"));
     }
 
@@ -269,11 +314,9 @@ mod tests {
     fn plugin_command_parsed_from_ex() {
         use crate::input::{parse_ex_command, EditorCommand};
 
-        // Known command → not a PluginCommand
         assert!(!matches!(parse_ex_command("w"), EditorCommand::PluginCommand(..)));
         assert!(!matches!(parse_ex_command("q"), EditorCommand::PluginCommand(..)));
 
-        // Unknown command → PluginCommand
         match parse_ex_command("AutoSave") {
             EditorCommand::PluginCommand(name, args) => {
                 assert_eq!(name, "AutoSave");
@@ -282,7 +325,6 @@ mod tests {
             other => panic!("Expected PluginCommand, got {:?}", other),
         }
 
-        // Unknown command with args
         match parse_ex_command("Format rust") {
             EditorCommand::PluginCommand(name, args) => {
                 assert_eq!(name, "Format");

@@ -198,6 +198,13 @@ impl Buffer {
         self.file_path.as_deref().and_then(|p| p.to_str())
     }
 
+    /// Refresh git gutter signs from HEAD diff.
+    pub fn refresh_git_signs(&mut self) {
+        if let Some(path) = &self.file_path {
+            self.git_signs = crate::git::diff_signs(path);
+        }
+    }
+
     /// Reload the buffer content from disk (for auto-reload).
     pub fn reload_from_file(&mut self) -> bool {
         let path = match &self.file_path {

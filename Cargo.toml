@@ -66,6 +66,7 @@ env_logger = "0.11"
 arboard = "3"
 git2 = "0.19"
 mlua = { version = "0.10", features = ["lua54", "vendored", "send"] }
+glob = "0.3"
 
 # Internal crates
 novim-types = { path = "crates/novim-types" }

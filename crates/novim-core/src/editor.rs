@@ -534,31 +534,126 @@ impl EditorState {
         cmd: EditorCommand,
         screen_area: novim_types::Rect,
     ) -> Result<ExecOutcome, NovimError> {
+        // Clear previous status message on new command (unless it's Noop)
+        if !matches!(cmd, EditorCommand::Noop) {
+            self.status_message = None;
+        }
         let old_mode = self.mode;
         let events = Self::events_for_command(&cmd, self);
         let result = self.execute_inner(cmd, screen_area);
         if result.is_ok() {
+            let snapshot = self.make_buffer_snapshot();
             // Emit mode change if it changed
             if self.mode != old_mode {
-                let mode_cmds = self.plugins.dispatch(&crate::plugin::EditorEvent::ModeChanged {
-                    from: old_mode.display_name().to_string(),
-                    to: self.mode.display_name().to_string(),
-                });
-                for cmd_str in mode_cmds {
-                    let parsed = parse_ex_command(&cmd_str);
-                    let _ = self.execute(parsed, screen_area);
-                }
+                let actions = self.plugins.dispatch(
+                    &crate::plugin::EditorEvent::ModeChanged {
+                        from: old_mode.display_name().to_string(),
+                        to: self.mode.display_name().to_string(),
+                    },
+                    &snapshot,
+                );
+                self.run_plugin_actions(actions, screen_area);
             }
-            // Emit command-specific events and execute any commands plugins return
+            // Emit command-specific events
             for event in events {
-                let plugin_cmds = self.plugins.dispatch(&event);
-                for cmd_str in plugin_cmds {
-                    let parsed = parse_ex_command(&cmd_str);
-                    let _ = self.execute(parsed, screen_area);
-                }
+                let actions = self.plugins.dispatch(&event, &snapshot);
+                self.run_plugin_actions(actions, screen_area);
             }
         }
         result
+    }
+
+    /// Build a read-only snapshot of the focused buffer for plugin dispatch.
+    fn make_buffer_snapshot(&self) -> crate::plugin::BufferSnapshot {
+        let buf = self.focused_buf();
+        let cursor = buf.cursor();
+        let sel = buf.selection().map(|s| {
+            let (start, end) = s.ordered();
+            (start.line, start.column, end.line, end.column)
+        });
+        crate::plugin::BufferSnapshot {
+            lines: (0..buf.len_lines()).filter_map(|i| buf.get_line(i)).collect(),
+            line_count: buf.len_lines(),
+            cursor_line: cursor.line,
+            cursor_col: cursor.column,
+            path: Some(buf.display_name()),
+            is_dirty: buf.is_dirty(),
+            mode: self.mode.display_name().to_string(),
+            selection: sel,
+        }
+    }
+
+    /// Execute actions returned by plugins.
+    fn run_plugin_actions(&mut self, actions: Vec<crate::plugin::PluginAction>, screen_area: novim_types::Rect) {
+        use crate::plugin::PluginAction;
+        for action in actions {
+            match action {
+                PluginAction::ExecCommand(cmd_str) => {
+                    let parsed = parse_ex_command(&cmd_str);
+                    let _ = self.execute(parsed, screen_area);
+                }
+                PluginAction::SetLines { start, end, lines } => {
+                    let buf = self.focused_buf_mut();
+                    // Delete lines [start..end], then insert new lines at start
+                    let delete_count = end.saturating_sub(start);
+                    for _ in 0..delete_count {
+                        buf.set_cursor_pos(novim_types::Position::new(start, 0));
+                        buf.delete_lines(1);
+                    }
+                    buf.set_cursor_pos(novim_types::Position::new(start, 0));
+                    for line in &lines {
+                        for c in line.chars() {
+                            buf.insert_char(c);
+                        }
+                        buf.insert_char('\n');
+                    }
+                    buf.break_undo_group();
+                }
+                PluginAction::InsertText { line, col, text } => {
+                    let buf = self.focused_buf_mut();
+                    buf.set_cursor_pos(novim_types::Position::new(line, col));
+                    for c in text.chars() {
+                        buf.insert_char(c);
+                    }
+                    buf.break_undo_group();
+                }
+                PluginAction::SetCursor { line, col } => {
+                    self.focused_buf_mut().set_cursor_pos(
+                        novim_types::Position::new(line, col),
+                    );
+                }
+                PluginAction::SetStatus(msg) => {
+                    self.status_message = Some(msg);
+                }
+                PluginAction::RegisterKeymap { mode, key, action } => {
+                    self.plugins.keymaps.register(&mode, &key, "lua", action);
+                }
+            }
+        }
+    }
+
+    /// Look up a plugin keymap and execute it if found. Returns true if handled.
+    pub fn try_plugin_keymap(&mut self, mode: &str, key_str: &str, screen_area: novim_types::Rect) -> bool {
+        let entry = self.plugins.keymaps.lookup(mode, key_str);
+        let action = match entry {
+            Some(e) => e.action.clone(),
+            None => return false,
+        };
+        match action {
+            crate::plugin::KeymapAction::Command(cmd) => {
+                let parsed = parse_ex_command(&cmd);
+                let _ = self.execute(parsed, screen_area);
+            }
+            crate::plugin::KeymapAction::LuaCallback { plugin_id: _, callback_key } => {
+                let snapshot = self.make_buffer_snapshot();
+                let event = crate::plugin::EditorEvent::CommandExecuted {
+                    command: format!("__keymap:{}", callback_key),
+                };
+                let actions = self.plugins.dispatch(&event, &snapshot);
+                self.run_plugin_actions(actions, screen_area);
+            }
+        }
+        true
     }
 
     /// Map a command to the editor events it should emit (called before execution
@@ -1263,14 +1358,12 @@ impl EditorState {
             }
             EditorCommand::PluginCommand(name, args) => {
                 if self.plugins.has_command(&name) {
+                    let snapshot = self.make_buffer_snapshot();
                     let event = crate::plugin::EditorEvent::CommandExecuted {
                         command: if args.is_empty() { name.clone() } else { format!("{} {}", name, args) },
                     };
-                    let commands = self.plugins.dispatch(&event);
-                    for cmd_str in commands {
-                        let parsed = parse_ex_command(&cmd_str);
-                        self.execute(parsed, screen_area)?;
-                    }
+                    let actions = self.plugins.dispatch(&event, &snapshot);
+                    self.run_plugin_actions(actions, screen_area);
                     Ok(ExecOutcome::Continue)
                 } else {
                     self.status_message = Some(format!("Unknown command: {}", name));

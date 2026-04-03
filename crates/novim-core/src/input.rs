@@ -9,7 +9,7 @@ use crate::pane::SplitDirection;
 
 /// Convert a key event to a string representation for config lookup.
 /// Examples: "u", "Ctrl+s", "Ctrl+r", "Esc", "Enter"
-fn key_to_string(key: &KeyEvent) -> String {
+pub fn key_to_string(key: &KeyEvent) -> String {
     let mut parts = Vec::new();
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         parts.push("Ctrl".to_string());

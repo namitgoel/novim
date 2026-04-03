@@ -49,6 +49,7 @@ git2 = { workspace = true }
 
 # Lua plugin runtime
 mlua = { workspace = true }
+glob = { workspace = true }
 
 # Serialization
 serde = { workspace = true }

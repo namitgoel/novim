@@ -11,7 +11,7 @@ mod renderer;
 use crossterm::event::KeyCode;
 use novim_core::editor::{EditorState, ExecOutcome};
 use novim_core::input::{
-    key_to_command, lookup_custom_keybinding, EditorCommand, InputState,
+    key_to_command, key_to_string, lookup_custom_keybinding, EditorCommand, InputState,
 };
 use novim_types::EditorMode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -489,6 +489,14 @@ fn handle_key(
     let popup_showing = editor.show_help
         || editor.tabs[editor.active_tab].show_buffer_list
         || editor.show_workspace_list;
+
+    // Check plugin keymaps first (before borrowing config)
+    let key_str = key_to_string(&key);
+    let mode_str = editor.mode.display_name();
+    if !key_str.is_empty() && editor.try_plugin_keymap(mode_str, &key_str, screen) {
+        editor.input_state = InputState::Ready;
+        return false;
+    }
 
     let custom_bindings = match editor.mode {
         EditorMode::Normal => &editor.config.keybindings.normal,

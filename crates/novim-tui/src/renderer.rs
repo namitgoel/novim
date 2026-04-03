@@ -654,7 +654,7 @@ fn render_status_bar(f: &mut ratatui::Frame, area: Rect, state: &mut EditorState
         state.mode.display_name()
     };
 
-    let left = if let Some(msg) = state.status_message.take() {
+    let left = if let Some(msg) = &state.status_message {
         format!(" {} | {}{}{}", mode_name, msg, diag_info, pane_info)
     } else {
         format!(" {}{}{}", mode_name, diag_info, pane_info)
