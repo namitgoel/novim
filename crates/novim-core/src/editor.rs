@@ -412,6 +412,7 @@ impl EditorState {
     fn with_config_and_tabs(cfg: NovimConfig, registry: Arc<LspRegistry>, tabs: Vec<Workspace>, active_tab: usize, status_message: Option<String>) -> Self {
         let ln_mode = ln_mode_from_config(&cfg.editor.line_numbers);
         let mut plugins = PluginManager::new(false, std::collections::HashMap::new());
+        crate::plugin::builtins::register_builtins(&mut plugins);
         plugins.load_lua_plugins();
         Self {
             tabs,
@@ -645,6 +646,13 @@ impl EditorState {
                     self.focused_buf_mut().set_selection(None);
                     if self.mode == EditorMode::Visual {
                         self.mode = EditorMode::Normal;
+                    }
+                }
+                PluginAction::SetGutterSigns(signs) => {
+                    let idx = self.active_tab;
+                    let pane = self.tabs[idx].panes.focused_pane_mut();
+                    if let crate::pane::PaneContent::Editor(buf) = &mut pane.content {
+                        buf.git_signs = signs;
                     }
                 }
                 PluginAction::EmitEvent { name, data } => {

@@ -37,7 +37,7 @@ pub trait PaneDisplay {
     fn fold_all(&mut self) {}
     fn unfold_all(&mut self) {}
     fn recompute_folds(&mut self, _tab_width: usize) {}
-    fn git_sign(&self, _line: usize) -> Option<crate::git::GitSign> { None }
+    fn git_sign(&self, _line: usize) -> Option<crate::plugin::GutterSign> { None }
 }
 
 /// Text editing operations (insert, delete, undo/redo, save).
@@ -126,7 +126,7 @@ pub struct Buffer {
     /// Document version counter for LSP (incremented on every edit)
     version: i32,
     /// Git gutter signs (line → sign)
-    pub git_signs: std::collections::HashMap<usize, crate::git::GitSign>,
+    pub git_signs: std::collections::HashMap<usize, crate::plugin::GutterSign>,
     /// Last known file modification time (for auto-reload detection)
     pub last_modified: Option<std::time::SystemTime>,
 }
@@ -169,7 +169,6 @@ impl Buffer {
             Err(e) => return Err(e),
         };
 
-        let git_signs = crate::git::diff_signs(&path_buf);
         let last_modified = fs::metadata(&path_buf).ok()
             .and_then(|m| m.modified().ok());
 
@@ -189,20 +188,13 @@ impl Buffer {
             folds: FoldState::new(),
             cached_text: None,
             version: 0,
-            git_signs,
+            git_signs: std::collections::HashMap::new(),
             last_modified,
         })
     }
 
     pub fn file_path_str(&self) -> Option<&str> {
         self.file_path.as_deref().and_then(|p| p.to_str())
-    }
-
-    /// Refresh git gutter signs from HEAD diff.
-    pub fn refresh_git_signs(&mut self) {
-        if let Some(path) = &self.file_path {
-            self.git_signs = crate::git::diff_signs(path);
-        }
     }
 
     /// Reload the buffer content from disk (for auto-reload).
@@ -223,7 +215,7 @@ impl Buffer {
                 self.cached_text = None;
                 self.version += 1;
                 self.last_modified = fs::metadata(&path).ok().and_then(|m| m.modified().ok());
-                self.git_signs = crate::git::diff_signs(&path);
+                // git_signs are now managed by the GitSignsPlugin
                 true
             }
             Err(_) => false,
@@ -703,7 +695,7 @@ impl PaneDisplay for Buffer {
         self.folds = FoldState::detect_indent_folds(&lines, tab_width);
     }
 
-    fn git_sign(&self, line: usize) -> Option<crate::git::GitSign> {
+    fn git_sign(&self, line: usize) -> Option<crate::plugin::GutterSign> {
         self.git_signs.get(&line).copied()
     }
 }

@@ -3,6 +3,7 @@
 //! Provides the `Plugin` trait that all plugins (built-in Rust and user Lua)
 //! implement, plus error types and re-exports.
 
+pub mod builtins;
 pub mod lua_bridge;
 pub mod manager;
 pub mod registry;
@@ -80,6 +81,16 @@ pub enum PluginAction {
     ClearSelection,
     /// Emit a custom event to all plugins.
     EmitEvent { name: String, data: HashMap<String, String> },
+    /// Set gutter signs on the focused buffer (line → sign type).
+    SetGutterSigns(HashMap<usize, GutterSign>),
+}
+
+/// Gutter sign type for plugin-driven gutter indicators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GutterSign {
+    Added,
+    Modified,
+    Deleted,
 }
 
 /// What happens when a plugin-registered key is pressed.
