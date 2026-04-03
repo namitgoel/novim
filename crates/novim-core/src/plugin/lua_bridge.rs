@@ -576,6 +576,89 @@ impl LuaPlugin {
         novim.set("keymap", keymap_fn)
             .map_err(|e| format!("Failed to set novim.keymap: {}", e))?;
 
+        // ── novim.emit(event_name, data) — emit custom event to all plugins ──
+        let emit_fn = self.lua.create_function(|lua, (name, data): (String, Option<mlua::Table>)| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let push: Function = novim.get("_push_action")?;
+            let action = lua.create_table()?;
+            action.set("type", "emit_event")?;
+            action.set("name", name)?;
+            if let Some(data) = data {
+                action.set("data", data)?;
+            }
+            push.call::<()>(action)?;
+            Ok(())
+        }).map_err(|e| format!("Failed to create novim.emit: {}", e))?;
+        novim.set("emit", emit_fn)
+            .map_err(|e| format!("Failed to set novim.emit: {}", e))?;
+
+        // ── novim.schedule(fn) — run callback on next event cycle ──
+        let scheduled = self.lua.create_table()
+            .map_err(|e| format!("Failed to create _scheduled: {}", e))?;
+        novim.set("_scheduled", scheduled)
+            .map_err(|e| format!("Failed to set _scheduled: {}", e))?;
+
+        let schedule_fn = self.lua.create_function(|lua, callback: Function| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let scheduled: mlua::Table = novim.get("_scheduled")?;
+            let len = scheduled.len()?;
+            scheduled.set(len + 1, callback)?;
+            Ok(())
+        }).map_err(|e| format!("Failed to create novim.schedule: {}", e))?;
+        novim.set("schedule", schedule_fn)
+            .map_err(|e| format!("Failed to set novim.schedule: {}", e))?;
+
+        // ── novim.defer(ms, fn) — run callback after a delay ──
+        // Note: stores in _deferred table; the host polls and runs them
+        let deferred = self.lua.create_table()
+            .map_err(|e| format!("Failed to create _deferred: {}", e))?;
+        novim.set("_deferred", deferred)
+            .map_err(|e| format!("Failed to set _deferred: {}", e))?;
+
+        let defer_fn = self.lua.create_function(|lua, (ms, callback): (u64, Function)| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let deferred: mlua::Table = novim.get("_deferred")?;
+            let len = deferred.len()?;
+            let entry = lua.create_table()?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            entry.set("run_at", now + ms)?;
+            entry.set("fn", callback)?;
+            deferred.set(len + 1, entry)?;
+            Ok(())
+        }).map_err(|e| format!("Failed to create novim.defer: {}", e))?;
+        novim.set("defer", defer_fn)
+            .map_err(|e| format!("Failed to set novim.defer: {}", e))?;
+
+        // ── novim.lsp — LSP info API ──
+        let lsp = self.lua.create_table()
+            .map_err(|e| format!("Failed to create lsp table: {}", e))?;
+
+        // novim.lsp.on_attach(fn) — sugar for novim.on("LspAttach", fn)
+        lsp.set("on_attach", self.lua.create_function(|lua, handler: Function| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let handlers: mlua::Table = novim.get("_handlers")?;
+            let list: mlua::Table = match handlers.get::<Value>("LspAttach")? {
+                Value::Table(t) => t,
+                _ => {
+                    let t = lua.create_table()?;
+                    handlers.set("LspAttach", t.clone())?;
+                    t
+                }
+            };
+            let len = list.len()?;
+            let entry = lua.create_table()?;
+            entry.set("fn", handler)?;
+            list.set(len + 1, entry)?;
+            Ok(())
+        }).map_err(|e| format!("lsp.on_attach: {}", e))?)
+            .map_err(|e| format!("set lsp.on_attach: {}", e))?;
+
+        novim.set("lsp", lsp)
+            .map_err(|e| format!("Failed to set novim.lsp: {}", e))?;
+
         // Set global
         self.lua.globals().set("novim", novim)
             .map_err(|e| format!("Failed to set global novim: {}", e))?;
@@ -662,6 +745,18 @@ impl LuaPlugin {
             }
             "clear_selection" => {
                 Some(PluginAction::ClearSelection)
+            }
+            "emit_event" => {
+                let name: String = tbl.get("name").ok()?;
+                let mut data = std::collections::HashMap::new();
+                if let Ok(data_tbl) = tbl.get::<mlua::Table>("data") {
+                    for pair in data_tbl.pairs::<String, String>() {
+                        if let Ok((k, v)) = pair {
+                            data.insert(k, v);
+                        }
+                    }
+                }
+                Some(PluginAction::EmitEvent { name, data })
             }
             "register_keymap" => {
                 let mode: String = tbl.get("mode").ok()?;
@@ -785,6 +880,55 @@ impl LuaPlugin {
         self.drain_actions()
     }
 
+    /// Run scheduled callbacks and check deferred timers. Returns any actions they produce.
+    pub fn poll_timers(&self) -> Vec<PluginAction> {
+        let Ok(novim) = self.lua.globals().get::<mlua::Table>("novim") else { return vec![] };
+
+        // Run scheduled callbacks (one-shot, cleared after execution)
+        if let Ok(Value::Table(scheduled)) = novim.get::<Value>("_scheduled") {
+            for pair in scheduled.clone().pairs::<i64, Function>() {
+                if let Ok((_, callback)) = pair {
+                    if let Err(e) = callback.call::<()>(()) {
+                        log::warn!("Lua scheduled callback error in {}: {}", self.id, e);
+                    }
+                }
+            }
+            if let Ok(fresh) = self.lua.create_table() {
+                let _ = novim.set("_scheduled", fresh);
+            }
+        }
+
+        // Check deferred timers
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        if let Ok(Value::Table(deferred)) = novim.get::<Value>("_deferred") {
+            let remaining = self.lua.create_table().unwrap();
+            let mut remaining_idx = 1;
+
+            for pair in deferred.clone().pairs::<i64, mlua::Table>() {
+                if let Ok((_, entry)) = pair {
+                    let run_at: u64 = entry.get("run_at").unwrap_or(0);
+                    if now >= run_at {
+                        if let Ok(callback) = entry.get::<Function>("fn") {
+                            if let Err(e) = callback.call::<()>(()) {
+                                log::warn!("Lua deferred callback error in {}: {}", self.id, e);
+                            }
+                        }
+                    } else {
+                        let _ = remaining.set(remaining_idx, entry);
+                        remaining_idx += 1;
+                    }
+                }
+            }
+            let _ = novim.set("_deferred", remaining);
+        }
+
+        self.drain_actions()
+    }
+
     /// Get the list of command names this plugin registered.
     pub fn registered_commands(&self) -> Vec<String> {
         let mut names = Vec::new();
@@ -860,9 +1004,22 @@ impl Plugin for LuaPlugin {
                 }
                 ("CommandExecuted", HashMap::from([("command".into(), command.clone())]))
             }
+            EditorEvent::Custom { name, data } => {
+                return self.call_handlers(name, data, ctx);
+            }
+            EditorEvent::LspAttach { path, language } => {
+                ("LspAttach", HashMap::from([
+                    ("path".into(), path.clone()),
+                    ("language".into(), language.clone()),
+                ]))
+            }
         };
 
         self.call_handlers(event_name, &args, ctx)
+    }
+
+    fn poll_timers(&mut self) -> Vec<PluginAction> {
+        LuaPlugin::poll_timers(self)
     }
 }
 
@@ -1068,6 +1225,92 @@ mod tests {
         assert!(matches!(&actions[0], PluginAction::SetSelection {
             start_line: 0, start_col: 0, end_line: 1, end_col: 5
         }));
+    }
+
+    #[test]
+    fn lua_emit_custom_event() {
+        let mut plugin = lua_plugin_from_source("test_emit", r#"
+            -- Listen for custom event
+            novim.on("my_event", function(args)
+                novim.exec("echo got " .. (args.key or "nil"))
+            end)
+            -- Emit it on BufOpen
+            novim.on("BufOpen", function(args)
+                novim.emit("my_event", { key = "hello" })
+            end)
+        "#);
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        let ctx = ctx_with_snapshot();
+        let actions = plugin.on_event(&EditorEvent::BufOpen { path: "test.rs".into() }, &ctx);
+        // Should have EmitEvent action
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(&actions[0], PluginAction::EmitEvent { name, .. } if name == "my_event"));
+    }
+
+    #[test]
+    fn lua_schedule() {
+        let mut plugin = lua_plugin_from_source("test_schedule", r#"
+            novim.on("BufOpen", function(args)
+                novim.schedule(function()
+                    novim.exec("echo scheduled!")
+                end)
+            end)
+        "#);
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        let ctx = ctx_with_snapshot();
+        // BufOpen should schedule (not execute yet)
+        let actions = plugin.on_event(&EditorEvent::BufOpen { path: "test.rs".into() }, &ctx);
+        assert!(actions.is_empty()); // schedule doesn't produce immediate actions
+
+        // poll_timers should run the scheduled callback
+        let actions = plugin.poll_timers();
+        assert_exec_commands(&actions, &["echo scheduled!"]);
+
+        // Second poll should have nothing
+        let actions = plugin.poll_timers();
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn lua_defer() {
+        let mut plugin = lua_plugin_from_source("test_defer", r#"
+            novim.on("BufOpen", function(args)
+                novim.defer(0, function()
+                    novim.exec("echo deferred!")
+                end)
+            end)
+        "#);
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        let ctx = ctx_with_snapshot();
+        plugin.on_event(&EditorEvent::BufOpen { path: "test.rs".into() }, &ctx);
+
+        // 0ms delay means it should fire immediately on next poll
+        let actions = plugin.poll_timers();
+        assert_exec_commands(&actions, &["echo deferred!"]);
+    }
+
+    #[test]
+    fn lua_lsp_on_attach() {
+        let mut plugin = lua_plugin_from_source("test_lsp", r#"
+            novim.lsp.on_attach(function(args)
+                novim.exec("echo LSP attached: " .. args.language)
+            end)
+        "#);
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        let ctx = ctx_with_snapshot();
+        let actions = plugin.on_event(
+            &EditorEvent::LspAttach { path: "main.rs".into(), language: "rust".into() },
+            &ctx,
+        );
+        assert_exec_commands(&actions, &["echo LSP attached: rust"]);
     }
 
     fn ctx_with_snapshot() -> PluginContext {

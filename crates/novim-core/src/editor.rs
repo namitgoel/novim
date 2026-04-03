@@ -591,7 +591,7 @@ impl EditorState {
     }
 
     /// Execute actions returned by plugins.
-    fn run_plugin_actions(&mut self, actions: Vec<crate::plugin::PluginAction>, screen_area: novim_types::Rect) {
+    pub fn run_plugin_actions(&mut self, actions: Vec<crate::plugin::PluginAction>, screen_area: novim_types::Rect) {
         use crate::plugin::PluginAction;
         for action in actions {
             match action {
@@ -646,6 +646,12 @@ impl EditorState {
                     if self.mode == EditorMode::Visual {
                         self.mode = EditorMode::Normal;
                     }
+                }
+                PluginAction::EmitEvent { name, data } => {
+                    let snapshot = self.make_buffer_snapshot();
+                    let event = crate::plugin::EditorEvent::Custom { name, data };
+                    let actions = self.plugins.dispatch(&event, &snapshot);
+                    self.run_plugin_actions(actions, screen_area);
                 }
             }
         }

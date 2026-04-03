@@ -355,19 +355,19 @@ cargo build --release -p novim-neon
 
 ---
 
-## v1.0.0 — Plugin Architecture & Multi-Platform Release
+## v1.0.0 — Complete
 
-### Phase 1: Plugin Foundation (Pure Rust)
-
-Create `crates/novim-core/src/plugin/` module:
+### Plugin System Architecture
 
 ```
-plugin/
-├── mod.rs        # Plugin trait, PluginError, re-exports
-├── events.rs     # EditorEvent enum (BufOpen, BufWrite, TextChanged, ModeChanged, etc.)
-├── registry.rs   # CommandRegistry (string name → handler)
-├── context.rs    # PluginContext (restricted API for plugins)
-└── manager.rs    # PluginManager (lifecycle, event bus, dispatch)
+crates/novim-core/src/plugin/
+├── mod.rs          # Plugin trait, PluginAction, BufferSnapshot, EditorEvent,
+│                   #   PluginContext, KeymapRegistry, PluginError
+├── lua_bridge.rs   # LuaPlugin — wraps Lua scripts as Plugin impls
+│                   #   Full novim.* API, snapshot injection, action queue
+├── manager.rs      # PluginManager — lifecycle, dispatch, timer polling,
+│                   #   Lua plugin discovery, keymap registry
+└── registry.rs     # CommandRegistry — plugin-defined ex-commands
 ```
 
 **Plugin trait:**
@@ -377,53 +377,41 @@ pub trait Plugin: Send {
     fn name(&self) -> &str;
     fn init(&mut self, ctx: &mut PluginContext);
     fn shutdown(&mut self) {}
-    fn on_event(&mut self, event: &EditorEvent, ctx: &PluginContext) -> Vec<String>;
+    fn on_event(&mut self, event: &EditorEvent, ctx: &PluginContext) -> Vec<PluginAction>;
     fn is_builtin(&self) -> bool { false }
+    fn poll_timers(&mut self) -> Vec<PluginAction> { vec![] }
 }
 ```
 
-- Add `PluginManager` to `EditorState`
-- Emit events after mutations in `execute()`
-- Route unknown `:` commands through command registry
-- Add `plugins: HashMap<String, toml::Value>` to config
+**Architecture:**
+- Lua never holds `&mut EditorState` — reads via `BufferSnapshot`, writes via `PluginAction` queue
+- `PluginManager` on `EditorState`, dispatched from `execute()` after each command
+- Unknown `:` commands route through `CommandRegistry` → `PluginCommand` → plugin dispatch
+- Plugin keymaps checked before config keybindings in TUI + GUI event loops
+- `poll_timers()` called every 16ms tick for scheduled/deferred callbacks
+- Plugins loaded from `~/.config/novim/init.lua` + `~/.config/novim/plugins/*.lua`
 
-### Phase 2: Lua Runtime (mlua)
+### Lua Plugin API
 
-- Add `mlua` crate (Lua 5.4, vendored, Send)
-- `LuaPlugin` struct implementing `Plugin` trait
-- `novim` Lua API table:
-  - `novim.register_command()`, `novim.exec()`, `novim.on()`, `novim.keymap()`
-  - `novim.buf.*` (read/write), `novim.ui.*` (status, gutter signs)
-  - `novim.is_gui()` / `novim.is_tui()` for frontend detection
-- Load `~/.config/novim/init.lua` + `~/.config/novim/plugins/*.lua`
-- Unified `GutterSigns` with namespaces (replaces direct git/diagnostic rendering)
-- Error isolation: Lua errors logged, never crash
+| Category | Functions |
+|----------|-----------|
+| **Core** | `novim.on(event, [opts], fn)`, `novim.exec(cmd)`, `novim.register_command(name, fn)` |
+| **Buffer Read** | `novim.buf.get_lines(start, end)`, `get_text()`, `line_count()`, `path()`, `is_dirty()`, `cursor()` |
+| **Buffer Write** | `novim.buf.set_lines(start, end, lines)`, `insert(line, col, text)`, `set_cursor(line, col)` |
+| **Selection** | `novim.buf.get_selection()`, `selected_text()`, `set_selection(sl, sc, el, ec)`, `clear_selection()` |
+| **Shell/File** | `novim.fn.shell(cmd)`, `readfile(path)`, `writefile(path, lines)`, `glob(pattern)` |
+| **UI** | `novim.ui.status(msg)`, `log(msg)` |
+| **Keymaps** | `novim.keymap(mode, key, cmd_or_fn)` |
+| **Options** | `novim.opt.get(name)`, `novim.opt.set(name, value)` |
+| **Windows** | `novim.win.split(dir)`, `close()`, `count()` |
+| **Autocmd Filter** | `novim.on("BufWrite", { pattern = "*.rs" }, fn)` |
+| **Events** | `novim.emit(name, data)` — custom plugin-to-plugin events |
+| **Scheduling** | `novim.schedule(fn)`, `novim.defer(ms, fn)` |
+| **LSP** | `novim.lsp.on_attach(fn)` |
 
-### Phase 3: Built-in Feature Migration
+**Editor Events:** BufOpen, BufEnter, BufLeave, BufWrite, BufClose, TextChanged, CursorMoved, ModeChanged, CommandExecuted, Custom, LspAttach
 
-Wrap existing Rust modules as `Plugin` impls (same trait as user plugins):
-
-```
-plugin/builtins/
-├── mod.rs          # register_builtins(manager, config)
-├── git_signs.rs    # Wraps git::diff_signs() — subscribes to BufOpen, BufWrite
-├── lsp.rs          # Wraps lsp/ — subscribes to BufOpen, TextChanged
-├── syntax.rs       # Wraps highlight.rs — subscribes to BufOpen, TextChanged
-├── explorer.rs     # Wraps explorer.rs — registers :explore command
-└── finder.rs       # Wraps finder.rs — registers Ctrl+P keybinding
-```
-
-- Built-in plugins can be disabled: `[plugins.git_signs] enabled = false`
-- Migration is incremental — both plugin and hardcoded paths coexist
-- No existing behavior breaks during migration
-
-### Phase 4: User Plugin Ecosystem
-
-- Plugin discovery from `~/.config/novim/plugins/*.lua`
-- `:PluginList` command showing all plugins + status
-- Error auto-disable after N consecutive failures
-- Optional `.toml` manifest (name, version, dependencies)
-- Example plugins: auto_save, zen_mode, format_on_save
+**PluginAction variants:** ExecCommand, SetLines, InsertText, SetCursor, SetStatus, RegisterKeymap, SetSelection, ClearSelection, EmitEvent
 
 ### Multi-Platform Release
 
@@ -439,6 +427,10 @@ Ship three targets from the same `novim-core` engine:
     Ratatui       wgpu/winit      Neon FFI
 ```
 
+### Test Coverage
+
+27 plugin tests covering: Plugin lifecycle, event dispatch, command registry, Lua event handlers, command registration, buffer read/write API, shell/file API, UI status, options get/set, window API, autocmd filtering, selection API, custom events, scheduling, defer, LSP on_attach.
+
 ---
 
 ## v2.0.0+ — Long-term Vision
@@ -453,3 +445,6 @@ Ship three targets from the same `novim-core` engine:
 - Minimap / code overview
 - Breadcrumbs / symbol outline
 - DAP (Debug Adapter Protocol) integration
+- `:PluginList` command showing all plugins + status
+- Plugin manifest (name, version, dependencies)
+- Built-in feature migration (git_signs, syntax, LSP as real plugins with buffer access)

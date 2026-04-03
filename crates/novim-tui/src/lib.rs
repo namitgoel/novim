@@ -96,6 +96,14 @@ impl TerminalManager {
             // Check for external file changes (auto-reload)
             self.state.check_external_changes();
 
+            // Poll plugin scheduled/deferred callbacks
+            let timer_actions = self.state.plugins.poll_timers();
+            if !timer_actions.is_empty() {
+                let size = self.terminal.size()?;
+                let screen_area = novim_types::Rect::new(0, 0, size.width, size.height);
+                self.state.run_plugin_actions(timer_actions, screen_area);
+            }
+
             // Reparse syntax highlights only for the active workspace
             self.state.focused_buf_mut().reparse_highlights();
 

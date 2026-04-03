@@ -113,6 +113,19 @@ impl PluginManager {
         self.registry.lookup(name).is_some()
     }
 
+    /// Poll all plugins for scheduled/deferred callbacks. Returns actions.
+    pub fn poll_timers(&mut self) -> Vec<PluginAction> {
+        let mut all_actions = Vec::new();
+        for plugin in &mut self.plugins {
+            let id = plugin.id().to_string();
+            if !self.enabled.get(&id).copied().unwrap_or(false) {
+                continue;
+            }
+            all_actions.extend(plugin.poll_timers());
+        }
+        all_actions
+    }
+
     fn config_dir() -> Option<PathBuf> {
         let home = std::env::var("HOME").ok()?;
         Some(PathBuf::from(home).join(".config").join("novim"))

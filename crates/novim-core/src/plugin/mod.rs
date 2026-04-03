@@ -78,6 +78,8 @@ pub enum PluginAction {
     SetSelection { start_line: usize, start_col: usize, end_line: usize, end_col: usize },
     /// Clear visual selection.
     ClearSelection,
+    /// Emit a custom event to all plugins.
+    EmitEvent { name: String, data: HashMap<String, String> },
 }
 
 /// What happens when a plugin-registered key is pressed.
@@ -135,6 +137,8 @@ pub trait Plugin: Send {
     /// Called when an editor event fires. Returns actions to execute.
     fn on_event(&mut self, event: &EditorEvent, ctx: &PluginContext) -> Vec<PluginAction>;
     fn is_builtin(&self) -> bool { false }
+    /// Poll scheduled/deferred callbacks. Default: no-op.
+    fn poll_timers(&mut self) -> Vec<PluginAction> { vec![] }
 }
 
 // ── Events ──
@@ -151,6 +155,10 @@ pub enum EditorEvent {
     CursorMoved { line: usize, column: usize },
     ModeChanged { from: String, to: String },
     CommandExecuted { command: String },
+    /// Custom event emitted by plugins via novim.emit().
+    Custom { name: String, data: HashMap<String, String> },
+    /// LSP server attached to a buffer.
+    LspAttach { path: String, language: String },
 }
 
 // ── PluginContext ──
