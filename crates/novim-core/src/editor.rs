@@ -342,6 +342,15 @@ pub struct PluginPopup {
     pub on_select: Option<(String, String)>,
 }
 
+/// Record of an edit operation for dot repeat.
+#[derive(Debug, Clone)]
+pub struct EditRecord {
+    /// The initial edit command (e.g. DeleteLines, ChangeMotion, etc.)
+    pub command: EditorCommand,
+    /// Text typed during insert mode (for change commands).
+    pub insert_text: Vec<EditorCommand>,
+}
+
 /// Editor state — owns workspace tabs, mode, and transient UI state.
 pub struct EditorState {
     // Workspace tabs
@@ -355,7 +364,10 @@ pub struct EditorState {
     pub command_buffer: String,
     pub config: NovimConfig,
     pub lsp_registry: Arc<LspRegistry>,
-    pub clipboard: String,
+    /// Named registers (a-z, ", +). Unnamed register is '"'.
+    pub registers: HashMap<char, String>,
+    /// Pending register for the next yank/delete/paste operation.
+    pub pending_register: Option<char>,
     pub show_help: bool,
     pub help_scroll: usize,
     pub line_number_mode: LineNumberMode,
@@ -379,6 +391,12 @@ pub struct EditorState {
     pub marks: HashMap<char, (String, novim_types::Position)>,
     /// Current git branch name (for status bar).
     pub git_branch: Option<String>,
+    /// Last edit for dot repeat.
+    pub last_edit: Option<EditRecord>,
+    /// Whether we're recording insert-mode text for dot repeat.
+    recording_insert: bool,
+    /// Accumulated insert-mode keystrokes for dot repeat.
+    insert_record: Vec<EditorCommand>,
     /// Plugin system manager.
     pub plugins: PluginManager,
 }
@@ -459,7 +477,8 @@ impl EditorState {
             show_help: false,
             help_scroll: 0,
             line_number_mode: ln_mode,
-            clipboard: String::new(),
+            registers: HashMap::new(),
+            pending_register: None,
             config: cfg,
             lsp_registry: registry,
             count_state: CountState::default(),
@@ -476,6 +495,9 @@ impl EditorState {
             jump_index: 0,
             marks: HashMap::new(),
             git_branch,
+            last_edit: None,
+            recording_insert: false,
+            insert_record: Vec::new(),
             plugins,
         }
     }
@@ -579,6 +601,53 @@ impl EditorState {
         if !matches!(cmd, EditorCommand::Noop) {
             self.status_message = None;
         }
+
+        // ── Dot repeat tracking ──
+        // If recording insert mode text, capture insert commands
+        if self.recording_insert {
+            match &cmd {
+                EditorCommand::InsertChar(_) | EditorCommand::InsertTab
+                | EditorCommand::InsertNewline | EditorCommand::DeleteCharBefore => {
+                    self.insert_record.push(cmd.clone());
+                }
+                EditorCommand::SwitchMode(EditorMode::Normal) => {
+                    // Finalize: save the edit record with insert text
+                    self.recording_insert = false;
+                    if let Some(edit) = &mut self.last_edit {
+                        edit.insert_text = std::mem::take(&mut self.insert_record);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Detect edit commands to record for dot repeat (skip DotRepeat itself)
+        if !matches!(cmd, EditorCommand::DotRepeat | EditorCommand::Noop
+            | EditorCommand::SwitchMode(_) | EditorCommand::MoveCursor(_)
+            | EditorCommand::MoveCursorN(..) | EditorCommand::SelectRegister(_)) {
+            let is_edit = matches!(cmd,
+                EditorCommand::DeleteLines(_) | EditorCommand::DeleteMotion(..)
+                | EditorCommand::ChangeMotion(..) | EditorCommand::ChangeLines(_)
+                | EditorCommand::DeleteSelection | EditorCommand::Paste
+                | EditorCommand::DeleteTextObject(..) | EditorCommand::ChangeTextObject(..)
+                | EditorCommand::YankLines(_) | EditorCommand::InsertChar(_)
+            );
+            if is_edit && !self.recording_insert {
+                self.last_edit = Some(EditRecord {
+                    command: cmd.clone(),
+                    insert_text: Vec::new(),
+                });
+                // If this is a Change command, start recording insert text
+                let enters_insert = matches!(cmd,
+                    EditorCommand::ChangeMotion(..) | EditorCommand::ChangeLines(_)
+                    | EditorCommand::ChangeTextObject(..)
+                );
+                if enters_insert {
+                    self.recording_insert = true;
+                    self.insert_record.clear();
+                }
+            }
+        }
+
         let old_mode = self.mode;
         let events = Self::events_for_command(&cmd, self);
         let result = self.execute_inner(cmd, screen_area);
@@ -602,6 +671,33 @@ impl EditorState {
             }
         }
         result
+    }
+
+    /// Store text in a register. Also updates system clipboard for unnamed/+ register.
+    fn yank_to_register(&mut self, text: &str) {
+        let reg = self.pending_register.take().unwrap_or('"');
+        self.registers.insert(reg, text.to_string());
+        // Unnamed register always gets a copy
+        if reg != '"' {
+            self.registers.insert('"', text.to_string());
+        }
+        // System clipboard for unnamed or +
+        if reg == '"' || reg == '+' {
+            set_system_clipboard(text);
+        }
+    }
+
+    /// Read text from a register. Falls back to system clipboard for unnamed/+.
+    fn paste_from_register(&mut self) -> String {
+        let reg = self.pending_register.take().unwrap_or('"');
+        if reg == '+' || reg == '"' {
+            // Prefer system clipboard, fall back to register
+            get_system_clipboard()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| self.registers.get(&reg).cloned().unwrap_or_default())
+        } else {
+            self.registers.get(&reg).cloned().unwrap_or_default()
+        }
     }
 
     /// Record the current position in the jump list before a big jump.
@@ -707,7 +803,7 @@ impl EditorState {
                 }
                 PluginAction::ClearSelection => {
                     self.focused_buf_mut().set_selection(None);
-                    if self.mode == EditorMode::Visual {
+                    if self.mode.is_visual() {
                         self.mode = EditorMode::Normal;
                     }
                 }
@@ -831,7 +927,7 @@ impl EditorState {
             EditorCommand::ForceQuit => Ok(ExecOutcome::Quit),
             EditorCommand::MoveCursor(dir) => {
                 self.focused_buf_mut().move_cursor(dir);
-                if self.mode == EditorMode::Visual {
+                if self.mode.is_visual() {
                     let cursor = self.focused_buf().cursor();
                     if let Some(sel) = self.focused_buf().selection() {
                         self.focused_buf_mut()
@@ -884,10 +980,16 @@ impl EditorState {
                 self.mode = EditorMode::Visual;
                 Ok(ExecOutcome::Continue)
             }
+            EditorCommand::EnterVisualBlock => {
+                let cursor = self.focused_buf().cursor();
+                self.focused_buf_mut()
+                    .set_selection(Some(Selection::new(cursor, cursor)));
+                self.mode = EditorMode::VisualBlock;
+                Ok(ExecOutcome::Continue)
+            }
             EditorCommand::DeleteSelection => {
                 if let Some(text) = self.focused_buf_mut().delete_selection() {
-                    self.clipboard = text.clone();
-                    set_system_clipboard(&text);
+                    self.yank_to_register(&text);
                     self.focused_buf_mut().break_undo_group();
                 }
                 self.mode = EditorMode::Normal;
@@ -895,8 +997,7 @@ impl EditorState {
             }
             EditorCommand::YankSelection => {
                 if let Some(text) = self.focused_buf().selected_text() {
-                    self.clipboard = text.clone();
-                    set_system_clipboard(&text);
+                    self.yank_to_register(&text);
                     self.status_message = Some("Yanked".to_string());
                 }
                 self.focused_buf_mut().set_selection(None);
@@ -904,10 +1005,7 @@ impl EditorState {
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::Paste => {
-                // Prefer system clipboard, fall back to internal
-                let clip = get_system_clipboard()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| self.clipboard.clone());
+                let clip = self.paste_from_register();
                 if !clip.is_empty() {
                     let buf = self.focused_buf_mut();
                     for c in clip.chars() {
@@ -919,7 +1017,7 @@ impl EditorState {
             }
             EditorCommand::SwitchMode(mode) => {
                 self.focused_buf_mut().break_undo_group();
-                if self.mode == EditorMode::Visual && mode != EditorMode::Visual {
+                if self.mode.is_visual() && !mode.is_visual() {
                     self.focused_buf_mut().set_selection(None);
                 }
                 if mode == EditorMode::Normal {
@@ -1041,8 +1139,7 @@ impl EditorState {
             }
             EditorCommand::DeleteLines(n) => {
                 if let Some(deleted) = self.focused_buf_mut().delete_lines(n) {
-                    self.clipboard = deleted.clone();
-                    set_system_clipboard(&deleted);
+                    self.yank_to_register(&deleted);
                     self.focused_buf_mut().break_undo_group();
                     self.tabs[idx].notify_lsp_change();
                 }
@@ -1391,8 +1488,13 @@ impl EditorState {
                 self.search.pattern = None;
                 Ok(ExecOutcome::Continue)
             }
-            EditorCommand::ReplaceAll(pattern, replacement) => {
-                let count = self.focused_buf_mut().replace_all(&pattern, &replacement);
+            EditorCommand::ReplaceAll(pattern, replacement, case_insensitive) => {
+                let effective_pattern = if case_insensitive {
+                    format!("(?i){}", pattern)
+                } else {
+                    pattern
+                };
+                let count = self.focused_buf_mut().replace_all(&effective_pattern, &replacement);
                 self.status_message = Some(format!("{} replacements made", count));
                 Ok(ExecOutcome::Continue)
             }
@@ -1471,8 +1573,7 @@ impl EditorState {
                 };
                 if let Some((start, end)) = range {
                     if let Some(deleted) = self.focused_buf_mut().delete_text_range(start, end) {
-                        self.clipboard = deleted.clone();
-                        set_system_clipboard(&deleted);
+                        self.yank_to_register(&deleted);
                         self.focused_buf_mut().break_undo_group();
                     }
                     if is_change {
@@ -1496,6 +1597,59 @@ impl EditorState {
                         format!("[{}] {} ({}, {})", status, id, name, kind)
                     }).collect();
                     self.status_message = Some(items.join(" | "));
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::DotRepeat => {
+                if let Some(edit) = self.last_edit.clone() {
+                    let saved = edit.clone();
+                    // Replay the edit command
+                    self.execute(edit.command.clone(), screen_area)?;
+                    // If it had insert text, replay those too
+                    if !edit.insert_text.is_empty() {
+                        for insert_cmd in &edit.insert_text {
+                            self.execute(insert_cmd.clone(), screen_area)?;
+                        }
+                        // Return to normal mode
+                        self.execute(EditorCommand::SwitchMode(EditorMode::Normal), screen_area)?;
+                    }
+                    // Restore the edit record (replay shouldn't overwrite it)
+                    self.last_edit = Some(saved);
+                } else {
+                    self.status_message = Some("No last edit to repeat".to_string());
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::SelectRegister(c) => {
+                self.pending_register = Some(c);
+                self.status_message = Some(format!("\"{}",c));
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::YankLines(n) => {
+                // Yank N lines starting at cursor (without deleting)
+                let buf = self.focused_buf();
+                let start = buf.cursor().line;
+                let mut text = String::new();
+                for i in start..start + n {
+                    if let Some(line) = buf.get_line(i) {
+                        text.push_str(&line);
+                        text.push('\n');
+                    }
+                }
+                if !text.is_empty() {
+                    self.yank_to_register(&text);
+                    self.status_message = Some(format!("{} line(s) yanked", n));
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::YankMotion(_dir, _n) => {
+                // For now, yank = copy the text that would be deleted by the motion
+                // This is a simplified version — just yank the current line for most motions
+                let buf = self.focused_buf();
+                let cursor = buf.cursor();
+                if let Some(line) = buf.get_line(cursor.line) {
+                    self.yank_to_register(&line);
+                    self.status_message = Some("Yanked".to_string());
                 }
                 Ok(ExecOutcome::Continue)
             }

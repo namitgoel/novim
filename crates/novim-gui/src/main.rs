@@ -496,7 +496,44 @@ fn handle_key(
     }
     let popup_showing = editor.show_help
         || editor.tabs[editor.active_tab].show_buffer_list
-        || editor.show_workspace_list;
+        || editor.show_workspace_list
+        || editor.plugin_popup.is_some();
+
+    // Plugin popup: j/k to move, Enter to select, Esc/q to dismiss
+    if editor.plugin_popup.is_some() {
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(popup) = &mut editor.plugin_popup {
+                    if popup.selected + 1 < popup.lines.len() {
+                        popup.selected += 1;
+                    }
+                    let visible_h = popup.height.unwrap_or(popup.lines.len() as u16 + 2).saturating_sub(2) as usize;
+                    if popup.selected >= popup.scroll + visible_h {
+                        popup.scroll = popup.selected.saturating_sub(visible_h - 1);
+                    }
+                }
+                return false;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(popup) = &mut editor.plugin_popup {
+                    popup.selected = popup.selected.saturating_sub(1);
+                    if popup.selected < popup.scroll {
+                        popup.scroll = popup.selected;
+                    }
+                }
+                return false;
+            }
+            KeyCode::Enter => {
+                editor.handle_popup_select(screen);
+                return false;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                editor.plugin_popup = None;
+                return false;
+            }
+            _ => return false,
+        }
+    }
 
     // Check plugin keymaps first (before borrowing config)
     let key_str = key_to_string(&key);

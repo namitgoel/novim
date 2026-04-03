@@ -77,7 +77,19 @@ impl PluginManager {
             ctx.buf = snapshot.clone();
 
             let actions = plugin.on_event(event, &ctx);
-            self.error_counts.insert(id, 0);
+            if plugin.had_error() {
+                let count = self.error_counts.entry(id.clone()).or_insert(0);
+                *count += 1;
+                if *count >= 5 {
+                    log::warn!("Plugin '{}' auto-disabled after {} consecutive errors", id, count);
+                    self.enabled.insert(id.clone(), false);
+                    all_actions.push(PluginAction::SetStatus(
+                        format!("Plugin '{}' disabled (too many errors)", id),
+                    ));
+                }
+            } else {
+                self.error_counts.insert(id, 0);
+            }
             all_actions.extend(actions);
         }
 

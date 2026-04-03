@@ -473,45 +473,64 @@ examples/plugins/
 
 ---
 
-## v1.1.0 — Polish & Gaps
+## v1.1.0 — Complete
 
-### Plugin System Gaps
-- GUI popup rendering (currently TUI-only)
-- `novim.defer()` timer polling in GUI event loop (currently TUI-only)
-- Error auto-disable (disable plugin after N consecutive errors)
-- Plugin manifest (name, version, dependencies in `.toml`)
-- Plugin install from git URLs / package manager
+### Vim Features Added
+- **Named registers** — `"ayy` yank into register `a`, `"ap` paste from `a`, `"+` system clipboard
+- **Marks** — `ma` set mark, `'a` line jump, `` `a `` exact position jump
+- **Jump list** — `Ctrl+O` back, `Ctrl+I` forward, auto-push before gd/:e/search/gg/G
+- **Dot repeat** — `.` replays last edit (dd, cw+text, diw, etc.) with insert text capture
+- **Block visual** — `Ctrl+V` enters V-BLOCK column selection mode
+- **`:substitute` flags** — `:%s/foo/bar/i` for case-insensitive replace
+- **Ex-command ranges** — `5,10d` parses line ranges
+- **`:source`** — `:source path` hot-reloads a Lua plugin (unregisters old commands/keymaps)
+- **`yy`/`yw`/`y$`** — Yank operator (y + motion, yy for whole line)
 
-### Missing Vim Features
-- Registers (`"a`, `"b`, `"+` for system clipboard)
-- Marks (`ma`, `'a` to jump back)
-- Jump list (`Ctrl+O`, `Ctrl+I`)
-- `:substitute` with flags (`/g`, `/c`, `/i`)
-- Dot repeat (`.` to repeat last change)
-- Block visual mode (`Ctrl+V`)
-- Ex-command range (`:5,10d`, `:.,$s/...`)
-- `:source` to reload config/plugins
+### GUI Parity
+- Plugin popup rendering (selectable lists with j/k/Enter)
+- Plugin timer polling (`novim.defer()` / `novim.schedule()` work in GUI)
 
-### Editor Quality
-- Status bar shows git branch natively
-- Status bar shows cursor position (line:col)
-- Better error messages for failed plugin loads
-- `:set` shows current value when no arg (`:set ts` → `tabstop=4`)
+### Editor Polish
+- Git branch displayed in TUI status bar
+- `:set ts?` / `:set all` — query current option values
+- Plugin load errors surfaced in status bar
+- Error auto-disable — plugins disabled after 5 consecutive errors
+
+### Keybindings Added
+
+| Key | Mode | Action |
+|-----|------|--------|
+| `Ctrl+O` | Normal | Jump back |
+| `Ctrl+V` | Normal | Block visual mode |
+| `ma` | Normal | Set mark `a` |
+| `'a` / `` `a `` | Normal | Jump to mark (line / exact) |
+| `.` | Normal | Repeat last edit |
+| `"a` | Normal | Select register `a` for next d/y/p |
+| `yy` | Normal | Yank current line |
+| `yw` / `y$` / etc. | Normal | Yank with motion |
 
 ---
 
 ## v2.0.0+ — Long-term Vision
 
-- Collaborative editing (CRDT-based)
-- Remote development (SSH + local GUI)
-- Web version (WASM + WebGPU)
-- AI code completion integration
-- Plugin marketplace / package manager
-- Full Vim compatibility layer
+### Near-term
+- Plugin manifest (name, version, dependencies in `.toml`)
+- Plugin install from git URLs / package manager
+- `:substitute` confirm flag (`/c`) — interactive per-match confirm
+- Full range support in all ex-commands (`:5,10y`, `:'<,'>s/...`)
+- Floating windows (plugin-created, resizable)
+- Tree-sitter based code navigation (go to function, list symbols)
+
+### Medium-term
 - Inline git blame, diff view
 - Minimap / code overview
 - Breadcrumbs / symbol outline
 - DAP (Debug Adapter Protocol) integration
-- Floating windows (plugin-created, resizable)
 - LSP migration to plugin (if async plugin model is built)
-- Tree-sitter based code navigation (go to function, list symbols)
+
+### Long-term
+- Collaborative editing (CRDT-based)
+- Remote development (SSH + local GUI)
+- Web version (WASM + WebGPU)
+- AI code completion integration
+- Full Vim compatibility layer

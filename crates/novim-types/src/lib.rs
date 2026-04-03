@@ -35,28 +35,33 @@ pub enum EditorMode {
     Normal,
     Insert,
     Visual,
+    VisualBlock,
     Command,
 }
 
 impl EditorMode {
-    /// Get the display name for the mode (e.g., for status bar)
     pub fn display_name(&self) -> &'static str {
         match self {
             EditorMode::Normal => "NORMAL",
             EditorMode::Insert => "INSERT",
             EditorMode::Visual => "VISUAL",
+            EditorMode::VisualBlock => "V-BLOCK",
             EditorMode::Command => "COMMAND",
         }
     }
 
-    /// Get the short name for compact display
     pub fn short_name(&self) -> &'static str {
         match self {
             EditorMode::Normal => "N",
             EditorMode::Insert => "I",
             EditorMode::Visual => "V",
+            EditorMode::VisualBlock => "VB",
             EditorMode::Command => "C",
         }
+    }
+
+    pub fn is_visual(&self) -> bool {
+        matches!(self, EditorMode::Visual | EditorMode::VisualBlock)
     }
 }
 

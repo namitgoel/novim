@@ -161,7 +161,8 @@ pub enum EditorCommand {
     /// Jump to previous match
     PrevMatch,
     /// Replace all: (pattern, replacement)
-    ReplaceAll(String, String),
+    /// Replace all: (pattern, replacement, case_insensitive)
+    ReplaceAll(String, String, bool),
     /// Clear search highlights
     ClearSearch,
     /// Start recording macro into a register
@@ -248,6 +249,16 @@ pub enum EditorCommand {
     SetMark(char),
     /// Jump to a mark. Bool = exact position (true) vs line-only (false).
     JumpToMark(char, bool),
+    /// Enter block visual mode (column selection).
+    EnterVisualBlock,
+    /// Dot repeat — replay last edit.
+    DotRepeat,
+    /// Select a named register for the next yank/delete/paste.
+    SelectRegister(char),
+    /// Yank N lines (yy).
+    YankLines(usize),
+    /// Yank from cursor in direction (y + motion).
+    YankMotion(Direction, usize),
     /// Reload a Lua plugin file.
     SourceFile(String),
     /// A plugin-registered command (name, args).
@@ -277,13 +288,16 @@ pub enum InputState {
     WaitingMarkSet,
     /// Waiting for mark register after ' or `. Bool = exact position.
     WaitingMarkJump(bool),
+    /// Waiting for register name after '"'
+    WaitingRegister,
 }
 
-/// Pending operator (d = delete, c = change)
+/// Pending operator (d = delete, c = change, y = yank)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operator {
     Delete,
     Change,
+    Yank,
 }
 
 /// Text object modifier: inner (i) vs around (a).
@@ -375,6 +389,15 @@ pub fn key_to_command(
         };
     }
 
+    if input_state == InputState::WaitingRegister {
+        return match key.code {
+            KeyCode::Char(c) if c.is_ascii_lowercase() || c == '"' || c == '+' || c.is_ascii_digit() => {
+                (EditorCommand::SelectRegister(c), InputState::Ready)
+            }
+            _ => (EditorCommand::Noop, InputState::Ready),
+        };
+    }
+
     // Ctrl+C: cancel current operation (non-terminal), forward to PTY (terminal).
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) && !in_terminal {
         return (EditorCommand::ClearSearch, InputState::Ready);
@@ -436,6 +459,7 @@ pub fn key_to_command(
                 let cmd = match op {
                     Operator::Delete => EditorCommand::DeleteTextObject(modifier, k),
                     Operator::Change => EditorCommand::ChangeTextObject(modifier, k),
+                    Operator::Yank => EditorCommand::DeleteTextObject(modifier, k), // TODO: yank text object without delete
                 };
                 (cmd, InputState::Ready)
             }
@@ -469,7 +493,7 @@ pub fn key_to_command(
     match mode {
         EditorMode::Normal => normal_mode_command(key),
         EditorMode::Insert => (insert_mode_command(key), InputState::Ready),
-        EditorMode::Visual => (visual_mode_command(key), InputState::Ready),
+        EditorMode::Visual | EditorMode::VisualBlock => (visual_mode_command(key), InputState::Ready),
         _ => (EditorCommand::Noop, InputState::Ready),
     }
 }
@@ -544,14 +568,22 @@ fn normal_mode_command(key: KeyEvent) -> (EditorCommand, InputState) {
         KeyCode::Char('K') => (EditorCommand::ShowHover, InputState::Ready),
         KeyCode::Char('g') => (EditorCommand::Noop, InputState::WaitingGCommand),
         KeyCode::Char('z') => (EditorCommand::Noop, InputState::WaitingZCommand),
+        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            (EditorCommand::EnterVisualBlock, InputState::Ready)
+        }
         KeyCode::Char('v') => (EditorCommand::EnterVisual, InputState::Ready),
         KeyCode::Char('p') => (EditorCommand::Paste, InputState::Ready),
         KeyCode::Esc => (EditorCommand::ClearSearch, InputState::Ready),
         // Count prefix: digits 1-9 start a count, 0 is not a count starter
         KeyCode::Char(_c @ '1'..='9') => (EditorCommand::Noop, InputState::AccumulatingCount),
-        // Operators: d = delete, c = change
+        // Operators: d = delete, c = change, y = yank
         KeyCode::Char('d') => (EditorCommand::Noop, InputState::WaitingOperatorMotion(Operator::Delete)),
         KeyCode::Char('c') => (EditorCommand::Noop, InputState::WaitingOperatorMotion(Operator::Change)),
+        KeyCode::Char('y') => (EditorCommand::Noop, InputState::WaitingOperatorMotion(Operator::Yank)),
+        // Dot repeat
+        KeyCode::Char('.') => (EditorCommand::DotRepeat, InputState::Ready),
+        // Register selection: "a, "+, etc.
+        KeyCode::Char('"') => (EditorCommand::Noop, InputState::WaitingRegister),
         // q: stop macro recording if active, otherwise noop.
         // Use :q or Cmd+Q to quit the editor.
         KeyCode::Char('q') => (EditorCommand::StopMacroRecord, InputState::Ready),
@@ -621,51 +653,70 @@ fn insert_mode_command(key: KeyEvent) -> EditorCommand {
 
 /// Handle the motion key after an operator (d/c).
 fn operator_motion_command(key: KeyEvent, op: Operator) -> EditorCommand {
+    // Helper to create the right command for the operator + direction
+    let motion = |dir: Direction| -> EditorCommand {
+        match op {
+            Operator::Delete => EditorCommand::DeleteMotion(dir, 1),
+            Operator::Change => EditorCommand::ChangeMotion(dir, 1),
+            Operator::Yank => EditorCommand::YankMotion(dir, 1),
+        }
+    };
     match key.code {
-        // d/c + motion
-        KeyCode::Char('h') | KeyCode::Left => match op {
-            Operator::Delete => EditorCommand::DeleteMotion(Direction::Left, 1),
-            Operator::Change => EditorCommand::ChangeMotion(Direction::Left, 1),
-        },
-        KeyCode::Char('j') | KeyCode::Down => match op {
-            Operator::Delete => EditorCommand::DeleteMotion(Direction::Down, 1),
-            Operator::Change => EditorCommand::ChangeMotion(Direction::Down, 1),
-        },
-        KeyCode::Char('k') | KeyCode::Up => match op {
-            Operator::Delete => EditorCommand::DeleteMotion(Direction::Up, 1),
-            Operator::Change => EditorCommand::ChangeMotion(Direction::Up, 1),
-        },
-        KeyCode::Char('l') | KeyCode::Right => match op {
-            Operator::Delete => EditorCommand::DeleteMotion(Direction::Right, 1),
-            Operator::Change => EditorCommand::ChangeMotion(Direction::Right, 1),
-        },
-        // Word/line/file motions
-        KeyCode::Char('w') => match op {
-            Operator::Delete => EditorCommand::DeleteMotion(Direction::WordForward, 1),
-            Operator::Change => EditorCommand::ChangeMotion(Direction::WordForward, 1),
-        },
-        KeyCode::Char('b') => match op {
-            Operator::Delete => EditorCommand::DeleteMotion(Direction::WordBackward, 1),
-            Operator::Change => EditorCommand::ChangeMotion(Direction::WordBackward, 1),
-        },
-        KeyCode::Char('e') => match op {
-            Operator::Delete => EditorCommand::DeleteMotion(Direction::WordEnd, 1),
-            Operator::Change => EditorCommand::ChangeMotion(Direction::WordEnd, 1),
-        },
-        KeyCode::Char('0') => match op {
-            Operator::Delete => EditorCommand::DeleteMotion(Direction::LineStart, 1),
-            Operator::Change => EditorCommand::ChangeMotion(Direction::LineStart, 1),
-        },
-        KeyCode::Char('$') => match op {
-            Operator::Delete => EditorCommand::DeleteMotion(Direction::LineEnd, 1),
-            Operator::Change => EditorCommand::ChangeMotion(Direction::LineEnd, 1),
-        },
-        // dd = delete line, cc = change line
+        KeyCode::Char('h') | KeyCode::Left => motion(Direction::Left),
+        KeyCode::Char('j') | KeyCode::Down => motion(Direction::Down),
+        KeyCode::Char('k') | KeyCode::Up => motion(Direction::Up),
+        KeyCode::Char('l') | KeyCode::Right => motion(Direction::Right),
+        KeyCode::Char('w') => motion(Direction::WordForward),
+        KeyCode::Char('b') => motion(Direction::WordBackward),
+        KeyCode::Char('e') => motion(Direction::WordEnd),
+        KeyCode::Char('0') => motion(Direction::LineStart),
+        KeyCode::Char('$') => motion(Direction::LineEnd),
+        // dd = delete line, cc = change line, yy = yank line
         KeyCode::Char('d') if op == Operator::Delete => EditorCommand::DeleteLines(1),
         KeyCode::Char('c') if op == Operator::Change => EditorCommand::ChangeLines(1),
-        // Anything else cancels
+        KeyCode::Char('y') if op == Operator::Yank => EditorCommand::YankLines(1),
         _ => EditorCommand::Noop,
     }
+}
+
+/// Parse a range prefix from an ex-command string.
+/// Returns (optional range, remaining string).
+/// Examples: "5,10s/..." → (Some((4,9)), "s/..."), "%s/..." → (None, "s/..."), "d" → (None, "d")
+fn parse_range(input: &str) -> (Option<(usize, usize)>, &str) {
+    // % = entire file (no specific range, use ReplaceAll)
+    if let Some(rest) = input.strip_prefix('%') {
+        return (None, rest);
+    }
+    // Try N,M prefix
+    let mut chars = input.char_indices().peekable();
+    let mut start_str = String::new();
+    while let Some(&(_, c)) = chars.peek() {
+        if c.is_ascii_digit() {
+            start_str.push(c);
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    if !start_str.is_empty() {
+        if let Some(&(_, ',')) = chars.peek() {
+            chars.next(); // consume comma
+            let mut end_str = String::new();
+            while let Some(&(_, c)) = chars.peek() {
+                if c.is_ascii_digit() {
+                    end_str.push(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if let (Ok(start), Ok(end)) = (start_str.parse::<usize>(), end_str.parse::<usize>()) {
+                let rest_idx = chars.peek().map(|&(i, _)| i).unwrap_or(input.len());
+                return (Some((start.saturating_sub(1), end.saturating_sub(1))), &input[rest_idx..]);
+            }
+        }
+    }
+    (None, input)
 }
 
 fn visual_mode_command(key: KeyEvent) -> EditorCommand {
@@ -782,16 +833,29 @@ pub fn parse_ex_command(input: &str) -> EditorCommand {
             }
         }
         _ => {
-            // Handle %s/pattern/replacement/g
-            let s = input.strip_prefix('%').unwrap_or(input);
-            if let Some(rest) = s.strip_prefix("s/") {
-                let parts: Vec<&str> = rest.splitn(3, '/').collect();
+            // Parse range prefix: "5,10", "%", or nothing
+            let (range, rest) = parse_range(input);
+
+            // Handle s/pattern/replacement/[flags]
+            if let Some(sub_rest) = rest.strip_prefix("s/") {
+                let parts: Vec<&str> = sub_rest.splitn(3, '/').collect();
                 if parts.len() >= 2 {
                     let pattern = parts[0].to_string();
-                    let replacement = parts[1].to_string();
-                    return EditorCommand::ReplaceAll(pattern, replacement);
+                    let replacement = parts.get(1).unwrap_or(&"").to_string();
+                    let case_insensitive = parts.get(2).map(|f| f.contains('i')).unwrap_or(false);
+                    return EditorCommand::ReplaceAll(pattern, replacement, case_insensitive);
+                    // TODO: use range and case_insensitive when ReplaceRange is implemented
                 }
             }
+
+            // Handle range + d (e.g., 5,10d)
+            if rest == "d" {
+                if let Some((start, end)) = range {
+                    return EditorCommand::DeleteLines(end.saturating_sub(start) + 1);
+                    // TODO: proper range delete that moves cursor to start first
+                }
+            }
+
             // Fall through to plugin registry for unknown commands
             EditorCommand::PluginCommand(cmd.to_string(), args.to_string())
         }

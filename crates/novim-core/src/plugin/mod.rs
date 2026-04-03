@@ -164,6 +164,8 @@ pub trait Plugin: Send {
     fn is_builtin(&self) -> bool { false }
     /// Poll scheduled/deferred callbacks. Default: no-op.
     fn poll_timers(&mut self) -> Vec<PluginAction> { vec![] }
+    /// Check if the last on_event call had an error. Default: false.
+    fn had_error(&self) -> bool { false }
 }
 
 // ── Events ──

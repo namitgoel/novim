@@ -320,6 +320,8 @@ fn apply_popup_overlays(
         overlay_buffer_list(screen_lines, bg_rects, editor, cols, rows, cell_w, cell_h);
     } else if editor.show_workspace_list {
         overlay_workspace_list(screen_lines, bg_rects, editor, cols, rows, cell_w, cell_h);
+    } else if editor.plugin_popup.is_some() {
+        overlay_plugin_popup(screen_lines, bg_rects, editor, cols, rows, cell_w, cell_h);
     }
 }
 
@@ -672,6 +674,57 @@ fn overlay_workspace_list(
         let bg = if i == editor.workspace_list_selected { POPUP_SELECTED_F32 } else { POPUP_BG_F32 };
         let fg = if is_active { POPUP_HIGHLIGHT } else { POPUP_TEXT };
         stamp_line(screen_lines, bg_rects, row, x, popup_w, &line, fg, bg, cell_w, cell_h);
+    }
+
+    let border_bottom = format!("╰{}╯", "─".repeat(popup_w.saturating_sub(2)));
+    stamp_line(screen_lines, bg_rects, y + popup_h - 1, x, popup_w, &border_bottom, POPUP_BORDER, POPUP_BG_F32, cell_w, cell_h);
+}
+
+/// Plugin popup overlay.
+fn overlay_plugin_popup(
+    screen_lines: &mut [Vec<RichSpan>],
+    bg_rects: &mut Vec<crate::gpu::BgRect>,
+    editor: &EditorState,
+    cols: usize,
+    rows: usize,
+    cell_w: f32,
+    cell_h: f32,
+) {
+    let popup = match &editor.plugin_popup {
+        Some(p) => p,
+        None => return,
+    };
+    let selectable = popup.on_select.is_some();
+    let auto_w = popup.lines.iter().map(|l| l.len()).max().unwrap_or(20).max(popup.title.len() + 4) + 4;
+    let auto_h = popup.lines.len() + 2;
+    let popup_w = popup.width.map(|w| w as usize).unwrap_or(auto_w).clamp(10, cols.saturating_sub(4));
+    let popup_h = popup.height.map(|h| h as usize).unwrap_or(auto_h).clamp(4, rows.saturating_sub(4));
+    let x = (cols.saturating_sub(popup_w)) / 2;
+    let y = (rows.saturating_sub(popup_h)) / 2;
+
+    let title = format!(" {} ", popup.title);
+    let border_top = format!("╭{}{}╮", title, "─".repeat(popup_w.saturating_sub(title.len() + 2)));
+    stamp_line(screen_lines, bg_rects, y, x, popup_w, &border_top, POPUP_BORDER, POPUP_BG_F32, cell_w, cell_h);
+
+    let visible_h = popup_h.saturating_sub(2);
+    let max_scroll = popup.lines.len().saturating_sub(visible_h);
+    let scroll = popup.scroll.min(max_scroll);
+
+    for (vi, i) in (scroll..popup.lines.len()).take(visible_h).enumerate() {
+        let row = y + 1 + vi;
+        let line_text = &popup.lines[i];
+        let prefix = if selectable && i == popup.selected { "> " } else { "  " };
+        let text = format!("{}{}", prefix, line_text);
+        let padded = format!("│ {}{}│", text, " ".repeat(popup_w.saturating_sub(text.len() + 4).max(0)));
+        let bg = if selectable && i == popup.selected { POPUP_SELECTED_F32 } else { POPUP_BG_F32 };
+        stamp_line(screen_lines, bg_rects, row, x, popup_w, &padded, POPUP_TEXT, bg, cell_w, cell_h);
+    }
+
+    // Fill remaining empty rows
+    for vi in popup.lines.len().saturating_sub(scroll)..visible_h {
+        let row = y + 1 + vi;
+        let empty = format!("│{}│", " ".repeat(popup_w.saturating_sub(2)));
+        stamp_line(screen_lines, bg_rects, row, x, popup_w, &empty, POPUP_DIM, POPUP_BG_F32, cell_w, cell_h);
     }
 
     let border_bottom = format!("╰{}╯", "─".repeat(popup_w.saturating_sub(2)));
@@ -1133,7 +1186,7 @@ fn render_status_bar(editor: &EditorState, cols: usize) -> Vec<RichSpan> {
     let mode_color = match editor.mode {
         EditorMode::Normal => BLUE,
         EditorMode::Insert => GREEN,
-        EditorMode::Visual => YELLOW,
+        EditorMode::Visual | EditorMode::VisualBlock => YELLOW,
         EditorMode::Command => YELLOW,
     };
 

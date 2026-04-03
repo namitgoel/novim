@@ -17,6 +17,7 @@ pub struct LuaPlugin {
     name: String,
     path: PathBuf,
     lua: Lua,
+    last_had_error: bool,
 }
 
 impl LuaPlugin {
@@ -46,6 +47,7 @@ impl LuaPlugin {
             name,
             path: path.to_path_buf(),
             lua,
+            last_had_error: false,
         })
     }
 
@@ -892,7 +894,8 @@ impl LuaPlugin {
     }
 
     /// Call all Lua handlers registered for `event_name`, passing event data as args.
-    fn call_handlers(&self, event_name: &str, args: &HashMap<String, String>, ctx: &PluginContext) -> Vec<PluginAction> {
+    fn call_handlers(&mut self, event_name: &str, args: &HashMap<String, String>, ctx: &PluginContext) -> Vec<PluginAction> {
+        self.last_had_error = false;
         // Inject snapshot before calling handlers
         self.inject_snapshot(ctx);
         let Ok(novim) = self.lua.globals().get::<mlua::Table>("novim") else { return vec![] };
@@ -927,13 +930,14 @@ impl LuaPlugin {
                     if let Ok(handler) = tbl.get::<Function>("fn") {
                         if let Err(e) = handler.call::<()>(args_table.clone()) {
                             log::warn!("Lua handler error in {} for {}: {}", self.id, event_name, e);
+                            self.last_had_error = true;
                         }
                     }
                 }
-                // Legacy format: bare function (shouldn't happen with new on(), but be safe)
                 Value::Function(handler) => {
                     if let Err(e) = handler.call::<()>(args_table.clone()) {
                         log::warn!("Lua handler error in {} for {}: {}", self.id, event_name, e);
+                        self.last_had_error = true;
                     }
                 }
                 _ => {}
@@ -1111,6 +1115,10 @@ impl Plugin for LuaPlugin {
 
     fn poll_timers(&mut self) -> Vec<PluginAction> {
         LuaPlugin::poll_timers(self)
+    }
+
+    fn had_error(&self) -> bool {
+        self.last_had_error
     }
 }
 
