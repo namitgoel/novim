@@ -83,6 +83,15 @@ pub enum PluginAction {
     EmitEvent { name: String, data: HashMap<String, String> },
     /// Set gutter signs on the focused buffer (line → sign type).
     SetGutterSigns(HashMap<usize, GutterSign>),
+    /// Show a popup overlay with a title and lines of text.
+    ShowPopup {
+        title: String,
+        lines: Vec<String>,
+        width: Option<u16>,
+        height: Option<u16>,
+        /// (plugin_id, callback_key) for on_select. None = display-only.
+        on_select: Option<(String, String)>,
+    },
 }
 
 /// Gutter sign type for plugin-driven gutter indicators.

@@ -196,6 +196,45 @@ impl TerminalManager {
                             }
                         }
 
+                        // Plugin popup: j/k to move selection, Enter to select, Esc/q to dismiss
+                        if self.state.plugin_popup.is_some() {
+                            match key.code {
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    if let Some(popup) = &mut self.state.plugin_popup {
+                                        if popup.selected + 1 < popup.lines.len() {
+                                            popup.selected += 1;
+                                        }
+                                        // Auto-scroll to keep selection visible
+                                        let visible_h = popup.height.unwrap_or(popup.lines.len() as u16 + 2).saturating_sub(2) as usize;
+                                        if popup.selected >= popup.scroll + visible_h {
+                                            popup.scroll = popup.selected.saturating_sub(visible_h - 1);
+                                        }
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    if let Some(popup) = &mut self.state.plugin_popup {
+                                        popup.selected = popup.selected.saturating_sub(1);
+                                        if popup.selected < popup.scroll {
+                                            popup.scroll = popup.selected;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Enter => {
+                                    let size = self.terminal.size()?;
+                                    let screen_area = novim_types::Rect::new(0, 0, size.width, size.height);
+                                    self.state.handle_popup_select(screen_area);
+                                    continue;
+                                }
+                                KeyCode::Esc | KeyCode::Char('q') => {
+                                    self.state.plugin_popup = None;
+                                    continue;
+                                }
+                                _ => { continue; }
+                            }
+                        }
+
                         // Workspace list active: route keys to workspace selector
                         if self.state.show_workspace_list {
                             let handled = match key.code {
@@ -269,7 +308,7 @@ impl TerminalManager {
                         if self.state.hover_text.is_some() {
                             self.state.hover_text = None;
                         }
-                        let popup_showing = self.state.show_help || self.state.tabs[self.state.active_tab].show_buffer_list || self.state.show_workspace_list;
+                        let popup_showing = self.state.show_help || self.state.tabs[self.state.active_tab].show_buffer_list || self.state.show_workspace_list || self.state.plugin_popup.is_some();
 
                         // Check plugin keymaps first (before borrowing config)
                         let key_str = key_to_string(&key);

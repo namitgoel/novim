@@ -205,6 +205,11 @@ pub fn render(f: &mut ratatui::Frame, state: &mut EditorState) {
     if let Some(hover_text) = &state.hover_text {
         render_hover_popup(f, size, hover_text, state);
     }
+
+    // Plugin popup
+    if let Some(popup) = &state.plugin_popup {
+        render_plugin_popup(f, size, &popup.title, &popup.lines, popup.scroll, popup.selected, popup.on_select.is_some(), popup.width, popup.height);
+    }
 }
 
 /// Render the tab bar at the top of the screen.
@@ -858,6 +863,54 @@ fn render_help_popup(f: &mut ratatui::Frame, area: Rect, scroll: usize) {
         Block::default()
             .borders(Borders::ALL)
             .title(title)
+            .border_style(Style::default().fg(Color::Cyan))
+            .style(Style::default().bg(Color::Black)),
+    );
+
+    f.render_widget(popup, popup_area);
+}
+
+/// Render a plugin popup overlay.
+fn render_plugin_popup(f: &mut ratatui::Frame, area: Rect, title: &str, lines: &[String], scroll: usize, selected: usize, selectable: bool, custom_width: Option<u16>, custom_height: Option<u16>) {
+    let auto_width = lines.iter().map(|l| l.len()).max().unwrap_or(20).max(title.len() + 4) as u16 + 4;
+    let auto_height = lines.len() as u16 + 2;
+    let popup_width = custom_width.unwrap_or(auto_width).clamp(10, area.width.saturating_sub(4));
+    let popup_height = custom_height.unwrap_or(auto_height).clamp(4, area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let visible_height = popup_height.saturating_sub(2) as usize;
+    let max_scroll = lines.len().saturating_sub(visible_height);
+    let scroll = scroll.min(max_scroll);
+    let visible_lines: Vec<Line> = lines.iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible_height)
+        .map(|(i, l)| {
+            if selectable && i == selected {
+                Line::from(Span::styled(
+                    format!(" > {} ", l),
+                    Style::default().fg(Color::Black).bg(Color::Cyan),
+                ))
+            } else {
+                Line::from(Span::styled(format!("   {} ", l), Style::default().fg(Color::White)))
+            }
+        })
+        .collect();
+
+    let title_str = if lines.len() > visible_height {
+        format!(" {} ({}/{}) ", title, scroll + 1, max_scroll + 1)
+    } else {
+        format!(" {} ", title)
+    };
+
+    let popup = Paragraph::new(visible_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title_str)
             .border_style(Style::default().fg(Color::Cyan))
             .style(Style::default().bg(Color::Black)),
     );

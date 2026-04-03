@@ -370,6 +370,62 @@ impl LuaPlugin {
         }).map_err(|e| format!("ui.log: {}", e))?)
             .map_err(|e| format!("set ui.log: {}", e))?;
 
+        // novim.ui.popup(title, lines, [opts]) — show a popup overlay
+        // opts: { width = 60, height = 20, on_select = function(index, text) end }
+        ui.set("popup", self.lua.create_function(|lua, args: mlua::MultiValue| {
+            let mut args_vec: Vec<Value> = args.into_iter().collect();
+            if args_vec.len() < 2 {
+                return Err(mlua::Error::runtime("ui.popup requires at least 2 arguments: title, lines"));
+            }
+            let title = match args_vec.remove(0) {
+                Value::String(s) => s.to_str()?.to_string(),
+                _ => return Err(mlua::Error::runtime("first argument must be title string")),
+            };
+            let lines = match args_vec.remove(0) {
+                Value::Table(t) => t,
+                _ => return Err(mlua::Error::runtime("second argument must be lines table")),
+            };
+
+            let mut width: Option<u16> = None;
+            let mut height: Option<u16> = None;
+            let mut on_select_key: Option<String> = None;
+
+            if !args_vec.is_empty() {
+                if let Value::Table(opts) = args_vec.remove(0) {
+                    width = opts.get("width").ok();
+                    height = opts.get("height").ok();
+                    // Store on_select callback if provided
+                    if let Ok(callback) = opts.get::<Function>("on_select") {
+                        let novim: mlua::Table = lua.globals().get("novim")?;
+                        let callbacks: mlua::Table = match novim.get::<Value>("_popup_callbacks")? {
+                            Value::Table(t) => t,
+                            _ => {
+                                let t = lua.create_table()?;
+                                novim.set("_popup_callbacks", t.clone())?;
+                                t
+                            }
+                        };
+                        let key = format!("popup_{}", callbacks.len()? + 1);
+                        callbacks.set(key.as_str(), callback)?;
+                        on_select_key = Some(key);
+                    }
+                }
+            }
+
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let push: Function = novim.get("_push_action")?;
+            let action = lua.create_table()?;
+            action.set("type", "show_popup")?;
+            action.set("title", title)?;
+            action.set("lines", lines)?;
+            if let Some(w) = width { action.set("width", w)?; }
+            if let Some(h) = height { action.set("height", h)?; }
+            if let Some(key) = on_select_key { action.set("on_select_key", key)?; }
+            push.call::<()>(action)?;
+            Ok(())
+        }).map_err(|e| format!("ui.popup: {}", e))?)
+            .map_err(|e| format!("set ui.popup: {}", e))?;
+
         novim.set("ui", ui)
             .map_err(|e| format!("Failed to set novim.ui: {}", e))?;
 
@@ -746,6 +802,18 @@ impl LuaPlugin {
             "clear_selection" => {
                 Some(PluginAction::ClearSelection)
             }
+            "show_popup" => {
+                let title: String = tbl.get("title").ok()?;
+                let lines_tbl: mlua::Table = tbl.get("lines").ok()?;
+                let lines: Vec<String> = lines_tbl.pairs::<i64, String>()
+                    .filter_map(|r| r.ok().map(|(_, v)| v))
+                    .collect();
+                let width: Option<u16> = tbl.get("width").ok();
+                let height: Option<u16> = tbl.get("height").ok();
+                let on_select: Option<(String, String)> = tbl.get::<String>("on_select_key").ok()
+                    .map(|key| (String::new(), key));
+                Some(PluginAction::ShowPopup { title, lines, width, height, on_select })
+            }
             "emit_event" => {
                 let name: String = tbl.get("name").ok()?;
                 let mut data = std::collections::HashMap::new();
@@ -974,6 +1042,29 @@ impl Plugin for LuaPlugin {
                 let Ok(novim) = self.lua.globals().get::<mlua::Table>("novim") else {
                     return vec![];
                 };
+
+                // Handle popup select callbacks: __popup_select:<key>:<index>:<text>
+                if let Some(rest) = command.strip_prefix("__popup_select:") {
+                    // Parse: key:index:text
+                    let parts: Vec<&str> = rest.splitn(3, ':').collect();
+                    if parts.len() >= 2 {
+                        let callback_key = parts[0];
+                        let index: i64 = parts[1].parse().unwrap_or(0);
+                        let text = if parts.len() >= 3 { parts[2] } else { "" };
+
+                        let Ok(callbacks) = novim.get::<mlua::Table>("_popup_callbacks") else {
+                            return vec![];
+                        };
+                        if let Ok(handler) = callbacks.get::<Function>(callback_key) {
+                            self.inject_snapshot(ctx);
+                            if let Err(e) = handler.call::<()>((index + 1, text.to_string())) {
+                                log::warn!("Lua popup select error in {}: {}", self.id, e);
+                            }
+                            return self.drain_actions();
+                        }
+                    }
+                    return vec![];
+                }
 
                 // Handle keymap callbacks: __keymap:<key>
                 if let Some(callback_key) = command.strip_prefix("__keymap:") {

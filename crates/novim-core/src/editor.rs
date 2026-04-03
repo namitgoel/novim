@@ -330,6 +330,18 @@ pub struct MacroState {
     pub last_register: Option<char>,
 }
 
+/// Plugin popup state.
+pub struct PluginPopup {
+    pub title: String,
+    pub lines: Vec<String>,
+    pub scroll: usize,
+    pub selected: usize,
+    pub width: Option<u16>,
+    pub height: Option<u16>,
+    /// Plugin ID + callback key for on_select. None = display-only popup.
+    pub on_select: Option<(String, String)>,
+}
+
 /// Editor state — owns workspace tabs, mode, and transient UI state.
 pub struct EditorState {
     // Workspace tabs
@@ -358,6 +370,8 @@ pub struct EditorState {
     pub workspace_list_selected: usize,
     /// Show the welcome/splash screen (dismissed on first keypress).
     pub show_welcome: bool,
+    /// Plugin popup overlay (title, lines, scroll, width, height).
+    pub plugin_popup: Option<PluginPopup>,
     /// Plugin system manager.
     pub plugins: PluginManager,
 }
@@ -436,6 +450,7 @@ impl EditorState {
             show_workspace_list: false,
             workspace_list_selected: 0,
             show_welcome: false,
+            plugin_popup: None,
             plugins,
         }
     }
@@ -568,6 +583,14 @@ impl EditorState {
     fn make_buffer_snapshot(&self) -> crate::plugin::BufferSnapshot {
         let buf = self.focused_buf();
         let cursor = buf.cursor();
+        // Get full file path from the Buffer (not display_name which is just the filename)
+        let full_path = {
+            let pane = self.tabs[self.active_tab].panes.focused_pane();
+            match &pane.content {
+                crate::pane::PaneContent::Editor(b) => b.file_path_str().map(|s| s.to_string()),
+                _ => None,
+            }
+        };
         let sel = buf.selection().map(|s| {
             let (start, end) = s.ordered();
             (start.line, start.column, end.line, end.column)
@@ -577,7 +600,7 @@ impl EditorState {
             line_count: buf.len_lines(),
             cursor_line: cursor.line,
             cursor_col: cursor.column,
-            path: Some(buf.display_name()),
+            path: full_path.or_else(|| Some(buf.display_name())),
             is_dirty: buf.is_dirty(),
             mode: self.mode.display_name().to_string(),
             selection: sel,
@@ -648,6 +671,11 @@ impl EditorState {
                         self.mode = EditorMode::Normal;
                     }
                 }
+                PluginAction::ShowPopup { title, lines, width, height, on_select } => {
+                    self.plugin_popup = Some(PluginPopup {
+                        title, lines, scroll: 0, selected: 0, width, height, on_select,
+                    });
+                }
                 PluginAction::SetGutterSigns(signs) => {
                     let idx = self.active_tab;
                     let pane = self.tabs[idx].panes.focused_pane_mut();
@@ -687,6 +715,28 @@ impl EditorState {
             }
         }
         true
+    }
+
+    /// Handle Enter on a selectable plugin popup. Calls the on_select callback.
+    pub fn handle_popup_select(&mut self, screen_area: novim_types::Rect) {
+        let popup = match self.plugin_popup.take() {
+            Some(p) => p,
+            None => return,
+        };
+        let (_plugin_id, callback_key) = match popup.on_select {
+            Some(cb) => cb,
+            None => return, // display-only popup, Enter does nothing
+        };
+        let selected_index = popup.selected;
+        let selected_text = popup.lines.get(selected_index).cloned().unwrap_or_default();
+
+        // Dispatch as __popup_select:<callback_key>:<index>:<text>
+        let snapshot = self.make_buffer_snapshot();
+        let event = crate::plugin::EditorEvent::CommandExecuted {
+            command: format!("__popup_select:{}:{}:{}", callback_key, selected_index, selected_text),
+        };
+        let actions = self.plugins.dispatch(&event, &snapshot);
+        self.run_plugin_actions(actions, screen_area);
     }
 
     /// Map a command to the editor events it should emit (called before execution
@@ -1147,6 +1197,7 @@ impl EditorState {
                 self.tabs[self.active_tab].show_buffer_list = false;
                 self.show_workspace_list = false;
                 self.hover_text = None;
+                self.plugin_popup = None;
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::EnterSearch => {
