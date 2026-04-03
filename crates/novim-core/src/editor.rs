@@ -58,6 +58,16 @@ pub enum LineNumberMode {
     Off,
 }
 
+/// Collected LSP events from polling, before applying to state.
+#[derive(Default)]
+pub struct LspPollResult {
+    pub diagnostics: Vec<(String, Vec<lsp::Diagnostic>)>,
+    pub goto: Option<(String, u32, u32)>,
+    pub hover: Option<String>,
+    pub completions: Option<Vec<lsp::CompletionItem>>,
+    pub status_messages: Vec<String>,
+}
+
 /// Per-workspace state: panes, explorer, LSP, buffer history.
 pub struct Workspace {
     pub name: String,
@@ -125,43 +135,59 @@ impl Workspace {
         Self::new_with(name, panes, registry)
     }
 
-    /// Poll all LSP clients for events (diagnostics, goto responses).
-    pub fn poll_lsp(&mut self) {
+    /// Poll all LSP clients and return collected events.
+    pub fn poll_lsp_events(&mut self) -> LspPollResult {
+        let mut result = LspPollResult::default();
         let client_ids: Vec<String> = self.lsp_clients.keys().cloned().collect();
         for lang_id in client_ids {
             if let Some(client) = self.lsp_clients.get_mut(&lang_id) {
-                let events = client.poll();
-                for event in events {
+                for event in client.poll() {
                     match event {
                         LspEvent::Diagnostics { uri, diagnostics } => {
-                            self.diagnostics.insert(uri, diagnostics);
+                            result.diagnostics.push((uri, diagnostics));
                         }
                         LspEvent::GotoDefinitionResponse { uri, line, col } => {
-                            self.pending_goto = Some((uri, line, col));
+                            result.goto = Some((uri, line, col));
                         }
                         LspEvent::HoverResponse { contents } => {
-                            self.lsp_status = Some(format!("hover:{}", contents));
+                            result.hover = Some(contents);
                         }
                         LspEvent::CompletionResponse { items } => {
                             if !items.is_empty() {
-                                self.lsp_status = Some(format!("completion:{}", items.len()));
+                                result.completions = Some(items);
                             }
                         }
                         LspEvent::ServerError(msg) => {
-                            self.lsp_status = Some(format!("LSP: {}", msg));
+                            result.status_messages.push(format!("LSP: {}", msg));
                         }
                         LspEvent::Progress { message } => {
-                            self.lsp_status = Some(message);
+                            result.status_messages.push(message);
                         }
                         LspEvent::ServerExited => {
-                            self.lsp_status = Some("exited".to_string());
+                            result.status_messages.push(format!("LSP [{}] exited", lang_id));
                         }
                         LspEvent::Initialized => {
-                            self.lsp_status = Some("Ready".to_string());
+                            result.status_messages.push(format!("LSP [{}] ready", lang_id));
                         }
                     }
                 }
             }
+        }
+        result
+    }
+
+    /// Poll all LSP clients for events (diagnostics, goto responses).
+    /// Used for background (non-active) workspaces.
+    pub fn poll_lsp(&mut self) {
+        let result = self.poll_lsp_events();
+        for (uri, diags) in result.diagnostics {
+            self.diagnostics.insert(uri, diags);
+        }
+        if let Some(goto) = result.goto {
+            self.pending_goto = Some(goto);
+        }
+        if let Some(msg) = result.status_messages.last() {
+            self.lsp_status = Some(msg.clone());
         }
     }
 
@@ -700,6 +726,29 @@ impl EditorState {
         }
     }
 
+    /// Navigate the jump list forward or backward.
+    fn navigate_jump_list(&mut self, forward: bool) -> Result<ExecOutcome, NovimError> {
+        let can_move = if forward {
+            self.jump_index + 1 < self.jump_list.len()
+        } else {
+            self.jump_index > 0
+        };
+        if can_move {
+            if forward { self.jump_index += 1; } else { self.jump_index -= 1; }
+            if let Some((path, pos)) = self.jump_list.get(self.jump_index).cloned() {
+                let current_name = self.focused_buf().display_name();
+                if path != current_name {
+                    let _ = self.handle_edit_file(&path);
+                }
+                self.focused_buf_mut().set_cursor_pos(pos);
+            }
+        } else {
+            let msg = if forward { "Already at newest jump" } else { "Already at oldest jump" };
+            self.status_message = Some(msg.to_string());
+        }
+        Ok(ExecOutcome::Continue)
+    }
+
     /// Record the current position in the jump list before a big jump.
     pub fn push_jump(&mut self) {
         let path = self.focused_buf().display_name();
@@ -921,10 +970,236 @@ impl EditorState {
         cmd: EditorCommand,
         screen_area: novim_types::Rect,
     ) -> Result<ExecOutcome, NovimError> {
-        let idx = self.active_tab;
-        match cmd {
+        match &cmd {
+            // Navigation
+            EditorCommand::MoveCursor(..)
+            | EditorCommand::MoveCursorN(..)
+            | EditorCommand::AddCursorAbove
+            | EditorCommand::AddCursorBelow
+            | EditorCommand::ClearSecondaryCursors => self.execute_navigation(cmd),
+
+            // Folds
+            EditorCommand::ToggleFold
+            | EditorCommand::FoldAll
+            | EditorCommand::UnfoldAll => self.execute_fold(cmd),
+
+            // Visual mode
+            EditorCommand::EnterVisual
+            | EditorCommand::EnterVisualBlock
+            | EditorCommand::DeleteSelection
+            | EditorCommand::YankSelection => self.execute_visual(cmd),
+
+            // Editing
+            EditorCommand::Paste
+            | EditorCommand::SwitchMode(..)
+            | EditorCommand::InsertChar(..)
+            | EditorCommand::InsertTab
+            | EditorCommand::DeleteCharBefore
+            | EditorCommand::InsertNewline
+            | EditorCommand::Undo
+            | EditorCommand::Redo
+            | EditorCommand::Save
+            | EditorCommand::SaveAndQuit
+            | EditorCommand::DeleteMotion(..)
+            | EditorCommand::ChangeMotion(..)
+            | EditorCommand::DeleteLines(..)
+            | EditorCommand::ChangeLines(..)
+            | EditorCommand::DeleteTextObject(..)
+            | EditorCommand::ChangeTextObject(..) => self.execute_editing(cmd, screen_area),
+
+            // Panes
+            EditorCommand::SplitPane(..)
+            | EditorCommand::FocusDirection(..)
+            | EditorCommand::FocusNext
+            | EditorCommand::ClosePane
+            | EditorCommand::OpenTerminal
+            | EditorCommand::ForwardToTerminal(..) => self.execute_pane(cmd, screen_area),
+
+            // Command mode
+            EditorCommand::CommandInput(..)
+            | EditorCommand::CommandBackspace
+            | EditorCommand::CommandExecute
+            | EditorCommand::CommandCancel => self.execute_command_mode(cmd, screen_area),
+
+            // Finder
+            EditorCommand::OpenFileFinder
+            | EditorCommand::OpenFinderAt(..)
+            | EditorCommand::FinderInput(..)
+            | EditorCommand::FinderBackspace
+            | EditorCommand::FinderUp
+            | EditorCommand::FinderDown
+            | EditorCommand::FinderAccept
+            | EditorCommand::FinderDismiss => self.execute_finder(cmd),
+
+            // Workspace / tabs
+            EditorCommand::OpenTab(..)
+            | EditorCommand::NextTab
+            | EditorCommand::PrevTab
+            | EditorCommand::CloseTab
+            | EditorCommand::JumpToTab(..)
+            | EditorCommand::ListWorkspaces
+            | EditorCommand::RenameTab(..) => self.execute_workspace(cmd, screen_area),
+
+            // LSP commands
+            EditorCommand::ShowHover
+            | EditorCommand::GotoDefinition
+            | EditorCommand::TriggerCompletion
+            | EditorCommand::CompletionUp
+            | EditorCommand::CompletionDown
+            | EditorCommand::CompletionAccept
+            | EditorCommand::CompletionDismiss => self.execute_lsp_commands(cmd),
+
+            // Explorer
+            EditorCommand::ToggleExplorer
+            | EditorCommand::OpenExplorer(..)
+            | EditorCommand::FocusExplorer
+            | EditorCommand::ExplorerUp
+            | EditorCommand::ExplorerDown
+            | EditorCommand::ExplorerOpen
+            | EditorCommand::ToggleHelp
+            | EditorCommand::DismissPopup => self.execute_explorer(cmd),
+
+            // Search
+            EditorCommand::EnterSearch
+            | EditorCommand::SearchInput(..)
+            | EditorCommand::SearchBackspace
+            | EditorCommand::SearchExecute
+            | EditorCommand::SearchCancel
+            | EditorCommand::NextMatch
+            | EditorCommand::PrevMatch
+            | EditorCommand::ClearSearch
+            | EditorCommand::ReplaceAll(..) => self.execute_search(cmd),
+
+            // Scroll / buffer
+            EditorCommand::ScrollUp
+            | EditorCommand::ScrollDown
+            | EditorCommand::BufferNext
+            | EditorCommand::BufferPrev
+            | EditorCommand::BufferList
+            | EditorCommand::SetOption(..) => self.execute_scroll_buffer(cmd),
+
+            // Macros
+            EditorCommand::StartMacroRecord(..)
+            | EditorCommand::StopMacroRecord
+            | EditorCommand::ReplayMacro(..) => self.execute_macros(cmd, screen_area),
+
+            // Marks / jumps
+            EditorCommand::SetMark(..)
+            | EditorCommand::JumpToMark(..)
+            | EditorCommand::JumpBack
+            | EditorCommand::JumpForward => self.execute_marks_jumps(cmd),
+
+            // Kept inline
             EditorCommand::Quit => self.handle_quit(),
             EditorCommand::ForceQuit => Ok(ExecOutcome::Quit),
+            EditorCommand::SaveSession(name) => self.handle_save_session(name),
+            EditorCommand::EditFile(path) => {
+                self.push_jump();
+                self.handle_edit_file(path)
+            }
+            EditorCommand::DotRepeat => {
+                if let Some(edit) = self.last_edit.clone() {
+                    // Replay the edit command
+                    self.execute(edit.command.clone(), screen_area)?;
+                    // If it had insert text, replay those too
+                    if !edit.insert_text.is_empty() {
+                        for insert_cmd in &edit.insert_text {
+                            self.execute(insert_cmd.clone(), screen_area)?;
+                        }
+                        // Return to normal mode
+                        self.execute(EditorCommand::SwitchMode(EditorMode::Normal), screen_area)?;
+                    }
+                    // Restore the edit record (replay shouldn't overwrite it)
+                    self.last_edit = Some(edit);
+                } else {
+                    self.status_message = Some("No last edit to repeat".to_string());
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::SelectRegister(c) => {
+                self.pending_register = Some(*c);
+                self.status_message = Some(format!("\"{}",c));
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::YankLines(n) => {
+                // Yank N lines starting at cursor (without deleting)
+                let n = *n;
+                let buf = self.focused_buf();
+                let start = buf.cursor().line;
+                let mut text = String::new();
+                for i in start..start + n {
+                    if let Some(line) = buf.get_line(i) {
+                        text.push_str(&line);
+                        text.push('\n');
+                    }
+                }
+                if !text.is_empty() {
+                    self.yank_to_register(&text);
+                    self.status_message = Some(format!("{} line(s) yanked", n));
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::YankMotion(_dir, _n) => {
+                // For now, yank = copy the text that would be deleted by the motion
+                // This is a simplified version — just yank the current line for most motions
+                let buf = self.focused_buf();
+                let cursor = buf.cursor();
+                if let Some(line) = buf.get_line(cursor.line) {
+                    self.yank_to_register(&line);
+                    self.status_message = Some("Yanked".to_string());
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::Echo(msg) => {
+                self.status_message = Some(msg.clone());
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::PluginList => {
+                let list = self.plugins.list();
+                if list.is_empty() {
+                    self.status_message = Some("No plugins loaded".to_string());
+                } else {
+                    let items: Vec<String> = list.iter().map(|(id, name, enabled, builtin)| {
+                        let status = if *enabled { "+" } else { "-" };
+                        let kind = if *builtin { "builtin" } else { "user" };
+                        format!("[{}] {} ({}, {})", status, id, name, kind)
+                    }).collect();
+                    self.status_message = Some(items.join(" | "));
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::PluginCommand(name, args) => {
+                if self.plugins.has_command(name) {
+                    let snapshot = self.make_buffer_snapshot();
+                    let event = crate::plugin::EditorEvent::CommandExecuted {
+                        command: if args.is_empty() { name.clone() } else { format!("{} {}", name, args) },
+                    };
+                    let actions = self.plugins.dispatch(&event, &snapshot);
+                    self.run_plugin_actions(actions, screen_area);
+                    Ok(ExecOutcome::Continue)
+                } else {
+                    self.status_message = Some(format!("Unknown command: {}", name));
+                    Ok(ExecOutcome::Continue)
+                }
+            }
+            EditorCommand::SourceFile(path) => {
+                let resolved = if path.starts_with('/') || path.starts_with('~') {
+                    let p = path.replace('~', &std::env::var("HOME").unwrap_or_default());
+                    std::path::PathBuf::from(p)
+                } else {
+                    self.tabs[self.active_tab].shell_cwd().join(path)
+                };
+                self.plugins.reload_file(&resolved);
+                self.status_message = Some(format!("Reloaded: {}", resolved.display()));
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::Noop => Ok(ExecOutcome::Continue),
+            EditorCommand::ForceRedraw => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    fn execute_navigation(&mut self, cmd: EditorCommand) -> Result<ExecOutcome, NovimError> {
+        match cmd {
             EditorCommand::MoveCursor(dir) => {
                 self.focused_buf_mut().move_cursor(dir);
                 if self.mode.is_visual() {
@@ -933,6 +1208,13 @@ impl EditorState {
                         self.focused_buf_mut()
                             .set_selection(Some(Selection::new(sel.anchor, cursor)));
                     }
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::MoveCursorN(dir, n) => {
+                let buf = self.focused_buf_mut();
+                for _ in 0..n {
+                    buf.move_cursor(dir);
                 }
                 Ok(ExecOutcome::Continue)
             }
@@ -952,6 +1234,12 @@ impl EditorState {
                 self.focused_buf_mut().clear_secondary_cursors();
                 Ok(ExecOutcome::Continue)
             }
+            _ => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    fn execute_fold(&mut self, cmd: EditorCommand) -> Result<ExecOutcome, NovimError> {
+        match cmd {
             EditorCommand::ToggleFold => {
                 let line = self.focused_buf().cursor().line;
                 if self.focused_buf_mut().toggle_fold(line) {
@@ -973,6 +1261,12 @@ impl EditorState {
                 self.status_message = Some("All folds expanded".to_string());
                 Ok(ExecOutcome::Continue)
             }
+            _ => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    fn execute_visual(&mut self, cmd: EditorCommand) -> Result<ExecOutcome, NovimError> {
+        match cmd {
             EditorCommand::EnterVisual => {
                 let cursor = self.focused_buf().cursor();
                 self.focused_buf_mut()
@@ -1004,6 +1298,17 @@ impl EditorState {
                 self.mode = EditorMode::Normal;
                 Ok(ExecOutcome::Continue)
             }
+            _ => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    fn execute_editing(
+        &mut self,
+        cmd: EditorCommand,
+        _screen_area: novim_types::Rect,
+    ) -> Result<ExecOutcome, NovimError> {
+        let idx = self.active_tab;
+        match cmd {
             EditorCommand::Paste => {
                 let clip = self.paste_from_register();
                 if !clip.is_empty() {
@@ -1067,61 +1372,6 @@ impl EditorState {
                 self.handle_save()?;
                 self.handle_quit()
             }
-            EditorCommand::SplitPane(dir) => {
-                if self.focused_buf().is_terminal() {
-                    self.handle_split_terminal(dir, screen_area)
-                } else {
-                    self.handle_split(dir)
-                }
-            }
-            EditorCommand::FocusDirection(dir) => {
-                self.tabs[idx].panes.focus_direction(dir, screen_area);
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::FocusNext => {
-                self.tabs[idx].panes.focus_next();
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::ClosePane => self.handle_close_pane(),
-            EditorCommand::OpenTerminal => self.handle_open_terminal(screen_area),
-            EditorCommand::ForwardToTerminal(key) => {
-                self.focused_buf_mut().send_key(key);
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::SaveSession(name) => self.handle_save_session(&name),
-            EditorCommand::EditFile(path) => {
-                self.push_jump();
-                self.handle_edit_file(&path)
-            }
-            EditorCommand::CommandInput(c) => {
-                self.command_buffer.push(c);
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::CommandBackspace => {
-                if self.command_buffer.pop().is_none() {
-                    self.mode = EditorMode::Normal;
-                }
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::CommandExecute => {
-                let cmd_str = self.command_buffer.clone();
-                self.mode = EditorMode::Normal;
-                self.command_buffer.clear();
-                let parsed = parse_ex_command(&cmd_str);
-                self.execute(parsed, screen_area)
-            }
-            EditorCommand::CommandCancel => {
-                self.command_buffer.clear();
-                self.mode = EditorMode::Normal;
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::MoveCursorN(dir, n) => {
-                let buf = self.focused_buf_mut();
-                for _ in 0..n {
-                    buf.move_cursor(dir);
-                }
-                Ok(ExecOutcome::Continue)
-            }
             EditorCommand::DeleteMotion(dir, n) => {
                 let buf = self.focused_buf_mut();
                 buf.delete_motion(dir, n);
@@ -1153,6 +1403,102 @@ impl EditorState {
                 self.mode = EditorMode::Insert;
                 Ok(ExecOutcome::Continue)
             }
+            EditorCommand::DeleteTextObject(modifier, kind) | EditorCommand::ChangeTextObject(modifier, kind) => {
+                let is_change = matches!(cmd, EditorCommand::ChangeTextObject(..));
+                let range = {
+                    let buf = self.focused_buf_mut();
+                    use crate::input::{TextObjectModifier, TextObjectKind};
+                    match (modifier, kind) {
+                        (TextObjectModifier::Inner, TextObjectKind::Word) => buf.find_inner_word(),
+                        (TextObjectModifier::Around, TextObjectKind::Word) => buf.find_around_word(),
+                        (TextObjectModifier::Inner, TextObjectKind::Quote(q)) => buf.find_inner_quote(q),
+                        (TextObjectModifier::Around, TextObjectKind::Quote(q)) => buf.find_around_quote(q),
+                        (TextObjectModifier::Inner, TextObjectKind::Bracket(o, c)) => buf.find_inner_bracket(o, c),
+                        (TextObjectModifier::Around, TextObjectKind::Bracket(o, c)) => buf.find_around_bracket(o, c),
+                    }
+                };
+                if let Some((start, end)) = range {
+                    if let Some(deleted) = self.focused_buf_mut().delete_text_range(start, end) {
+                        self.yank_to_register(&deleted);
+                        self.focused_buf_mut().break_undo_group();
+                    }
+                    if is_change {
+                        self.mode = EditorMode::Insert;
+                    }
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            _ => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    fn execute_pane(
+        &mut self,
+        cmd: EditorCommand,
+        screen_area: novim_types::Rect,
+    ) -> Result<ExecOutcome, NovimError> {
+        let idx = self.active_tab;
+        match cmd {
+            EditorCommand::SplitPane(dir) => {
+                if self.focused_buf().is_terminal() {
+                    self.handle_split_terminal(dir, screen_area)
+                } else {
+                    self.handle_split(dir)
+                }
+            }
+            EditorCommand::FocusDirection(dir) => {
+                self.tabs[idx].panes.focus_direction(dir, screen_area);
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::FocusNext => {
+                self.tabs[idx].panes.focus_next();
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ClosePane => self.handle_close_pane(),
+            EditorCommand::OpenTerminal => self.handle_open_terminal(screen_area),
+            EditorCommand::ForwardToTerminal(key) => {
+                self.focused_buf_mut().send_key(key);
+                Ok(ExecOutcome::Continue)
+            }
+            _ => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    fn execute_command_mode(
+        &mut self,
+        cmd: EditorCommand,
+        screen_area: novim_types::Rect,
+    ) -> Result<ExecOutcome, NovimError> {
+        match cmd {
+            EditorCommand::CommandInput(c) => {
+                self.command_buffer.push(c);
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::CommandBackspace => {
+                if self.command_buffer.pop().is_none() {
+                    self.mode = EditorMode::Normal;
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::CommandExecute => {
+                let cmd_str = self.command_buffer.clone();
+                self.mode = EditorMode::Normal;
+                self.command_buffer.clear();
+                let parsed = parse_ex_command(&cmd_str);
+                self.execute(parsed, screen_area)
+            }
+            EditorCommand::CommandCancel => {
+                self.command_buffer.clear();
+                self.mode = EditorMode::Normal;
+                Ok(ExecOutcome::Continue)
+            }
+            _ => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    fn execute_finder(&mut self, cmd: EditorCommand) -> Result<ExecOutcome, NovimError> {
+        let idx = self.active_tab;
+        match cmd {
             EditorCommand::OpenFileFinder => {
                 let root = self.tabs[idx].shell_cwd();
                 self.finder.root = root.clone();
@@ -1219,6 +1565,17 @@ impl EditorState {
                 self.finder.visible = false;
                 Ok(ExecOutcome::Continue)
             }
+            _ => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    fn execute_workspace(
+        &mut self,
+        cmd: EditorCommand,
+        screen_area: novim_types::Rect,
+    ) -> Result<ExecOutcome, NovimError> {
+        let idx = self.active_tab;
+        match cmd {
             EditorCommand::OpenTab(path) => {
                 let dir = resolve_path(&path, &self.tabs[idx].panes, self.tabs[idx].last_shell_cwd.as_ref());
                 let name = dir.file_name()
@@ -1269,6 +1626,13 @@ impl EditorState {
                 self.status_message = Some(format!("Workspace renamed to: {}", name));
                 Ok(ExecOutcome::Continue)
             }
+            _ => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    fn execute_lsp_commands(&mut self, cmd: EditorCommand) -> Result<ExecOutcome, NovimError> {
+        let idx = self.active_tab;
+        match cmd {
             EditorCommand::ShowHover => {
                 self.with_lsp_client(|client, uri, cursor| {
                     let _ = client.hover(uri, cursor.line as u32, cursor.column as u32);
@@ -1289,6 +1653,55 @@ impl EditorState {
                 }
                 Ok(ExecOutcome::Continue)
             }
+            EditorCommand::TriggerCompletion => {
+                let msg = self.with_lsp_client(|client, uri, cursor| {
+                    match client.completion(uri, cursor.line as u32, cursor.column as u32) {
+                        Ok(()) => Some("Requesting completions...".to_string()),
+                        Err(e) => Some(format!("Completion error: {}", e)),
+                    }
+                });
+                self.status_message = msg.or(Some("No LSP available".to_string()));
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::CompletionUp => {
+                if self.completion.visible && self.completion.selected > 0 {
+                    self.completion.selected -= 1;
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::CompletionDown => {
+                if self.completion.visible && self.completion.selected + 1 < self.completion.items.len() {
+                    self.completion.selected += 1;
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::CompletionAccept => {
+                if self.completion.visible {
+                    if let Some(item) = self.completion.items.get(self.completion.selected) {
+                        let text = item.insert_text.clone().unwrap_or_else(|| item.label.clone());
+                        let buf = self.focused_buf_mut();
+                        for c in text.chars() {
+                            buf.insert_char(c);
+                        }
+                        self.tabs[idx].notify_lsp_change();
+                    }
+                    self.completion.visible = false;
+                    self.completion.items.clear();
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::CompletionDismiss => {
+                self.completion.visible = false;
+                self.completion.items.clear();
+                Ok(ExecOutcome::Continue)
+            }
+            _ => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    fn execute_explorer(&mut self, cmd: EditorCommand) -> Result<ExecOutcome, NovimError> {
+        let idx = self.active_tab;
+        match cmd {
             EditorCommand::ToggleExplorer => {
                 if self.tabs[idx].explorer.is_some() {
                     self.tabs[idx].explorer = None;
@@ -1341,6 +1754,12 @@ impl EditorState {
                 self.plugin_popup = None;
                 Ok(ExecOutcome::Continue)
             }
+            _ => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    fn execute_search(&mut self, cmd: EditorCommand) -> Result<ExecOutcome, NovimError> {
+        match cmd {
             EditorCommand::EnterSearch => {
                 self.search.active = true;
                 self.search.buffer.clear();
@@ -1378,9 +1797,9 @@ impl EditorState {
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::NextMatch => {
-                if let Some(pattern) = &self.search.pattern.clone() {
+                if let Some(pattern) = self.search.pattern.clone() {
                     let cursor = self.focused_buf().cursor();
-                    if let Some(pos) = self.focused_buf().search_forward(pattern, cursor) {
+                    if let Some(pos) = self.focused_buf().search_forward(&pattern, cursor) {
                         self.focused_buf_mut().set_cursor_pos(pos);
                     } else {
                         self.status_message = Some("No more matches".to_string());
@@ -1389,98 +1808,13 @@ impl EditorState {
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::PrevMatch => {
-                if let Some(pattern) = &self.search.pattern.clone() {
+                if let Some(pattern) = self.search.pattern.clone() {
                     let cursor = self.focused_buf().cursor();
-                    if let Some(pos) = self.focused_buf().search_backward(pattern, cursor) {
+                    if let Some(pos) = self.focused_buf().search_backward(&pattern, cursor) {
                         self.focused_buf_mut().set_cursor_pos(pos);
                     } else {
                         self.status_message = Some("No more matches".to_string());
                     }
-                }
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::TriggerCompletion => {
-                let msg = self.with_lsp_client(|client, uri, cursor| {
-                    match client.completion(uri, cursor.line as u32, cursor.column as u32) {
-                        Ok(()) => Some("Requesting completions...".to_string()),
-                        Err(e) => Some(format!("Completion error: {}", e)),
-                    }
-                });
-                self.status_message = msg.or(Some("No LSP available".to_string()));
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::CompletionUp => {
-                if self.completion.visible && self.completion.selected > 0 {
-                    self.completion.selected -= 1;
-                }
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::CompletionDown => {
-                if self.completion.visible && self.completion.selected + 1 < self.completion.items.len() {
-                    self.completion.selected += 1;
-                }
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::CompletionAccept => {
-                if self.completion.visible {
-                    if let Some(item) = self.completion.items.get(self.completion.selected) {
-                        let text = item.insert_text.clone().unwrap_or_else(|| item.label.clone());
-                        let buf = self.focused_buf_mut();
-                        for c in text.chars() {
-                            buf.insert_char(c);
-                        }
-                        self.tabs[idx].notify_lsp_change();
-                    }
-                    self.completion.visible = false;
-                    self.completion.items.clear();
-                }
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::CompletionDismiss => {
-                self.completion.visible = false;
-                self.completion.items.clear();
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::StartMacroRecord(reg) => {
-                if self.macros.recording.is_some() {
-                    if let Some(recording_reg) = self.macros.recording.take() {
-                        self.macros.registers.insert(recording_reg, std::mem::take(&mut self.macros.buffer));
-                        self.status_message = Some(format!("Recorded @{}", recording_reg));
-                    }
-                } else {
-                    self.macros.recording = Some(reg);
-                    self.macros.buffer.clear();
-                    self.status_message = Some(format!("Recording @{}...", reg));
-                }
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::StopMacroRecord => {
-                if let Some(reg) = self.macros.recording.take() {
-                    self.macros.registers.insert(reg, std::mem::take(&mut self.macros.buffer));
-                    self.status_message = Some(format!("Recorded @{}", reg));
-                }
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::ReplayMacro(reg) => {
-                let actual_reg = if reg == '@' {
-                    self.macros.last_register.unwrap_or('a')
-                } else {
-                    reg
-                };
-                self.macros.last_register = Some(actual_reg);
-
-                if let Some(keys) = self.macros.registers.get(&actual_reg).cloned() {
-                    self.status_message = Some(format!("Replaying @{} ({} keys)", actual_reg, keys.len()));
-                    for key in keys {
-                        let in_terminal = self.focused_buf().is_terminal();
-                        let popup_showing = self.show_help || self.tabs[self.active_tab].show_buffer_list;
-                        let (cmd, new_input_state) =
-                            key_to_command(self.mode, self.input_state, key, in_terminal, popup_showing, false);
-                        self.input_state = new_input_state;
-                        self.execute(cmd, screen_area)?;
-                    }
-                } else {
-                    self.status_message = Some(format!("Register @{} is empty", actual_reg));
                 }
                 Ok(ExecOutcome::Continue)
             }
@@ -1498,6 +1832,13 @@ impl EditorState {
                 self.status_message = Some(format!("{} replacements made", count));
                 Ok(ExecOutcome::Continue)
             }
+            _ => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    fn execute_scroll_buffer(&mut self, cmd: EditorCommand) -> Result<ExecOutcome, NovimError> {
+        let idx = self.active_tab;
+        match cmd {
             EditorCommand::ScrollUp => {
                 let n = self.config.editor.scroll_lines;
                 let focused_id = self.tabs[idx].panes.focused_id();
@@ -1556,133 +1897,65 @@ impl EditorState {
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::SetOption(opt) => self.handle_set_option(&opt),
-            EditorCommand::ForceRedraw => Ok(ExecOutcome::Continue),
-            EditorCommand::DeleteTextObject(modifier, kind) | EditorCommand::ChangeTextObject(modifier, kind) => {
-                let is_change = matches!(cmd, EditorCommand::ChangeTextObject(..));
-                let range = {
-                    let buf = self.focused_buf_mut();
-                    use crate::input::{TextObjectModifier, TextObjectKind};
-                    match (modifier, kind) {
-                        (TextObjectModifier::Inner, TextObjectKind::Word) => buf.find_inner_word(),
-                        (TextObjectModifier::Around, TextObjectKind::Word) => buf.find_around_word(),
-                        (TextObjectModifier::Inner, TextObjectKind::Quote(q)) => buf.find_inner_quote(q),
-                        (TextObjectModifier::Around, TextObjectKind::Quote(q)) => buf.find_around_quote(q),
-                        (TextObjectModifier::Inner, TextObjectKind::Bracket(o, c)) => buf.find_inner_bracket(o, c),
-                        (TextObjectModifier::Around, TextObjectKind::Bracket(o, c)) => buf.find_around_bracket(o, c),
+            _ => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    fn execute_macros(
+        &mut self,
+        cmd: EditorCommand,
+        screen_area: novim_types::Rect,
+    ) -> Result<ExecOutcome, NovimError> {
+        match cmd {
+            EditorCommand::StartMacroRecord(reg) => {
+                if self.macros.recording.is_some() {
+                    if let Some(recording_reg) = self.macros.recording.take() {
+                        self.macros.registers.insert(recording_reg, std::mem::take(&mut self.macros.buffer));
+                        self.status_message = Some(format!("Recorded @{}", recording_reg));
                     }
+                } else {
+                    self.macros.recording = Some(reg);
+                    self.macros.buffer.clear();
+                    self.status_message = Some(format!("Recording @{}...", reg));
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::StopMacroRecord => {
+                if let Some(reg) = self.macros.recording.take() {
+                    self.macros.registers.insert(reg, std::mem::take(&mut self.macros.buffer));
+                    self.status_message = Some(format!("Recorded @{}", reg));
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ReplayMacro(reg) => {
+                let actual_reg = if reg == '@' {
+                    self.macros.last_register.unwrap_or('a')
+                } else {
+                    reg
                 };
-                if let Some((start, end)) = range {
-                    if let Some(deleted) = self.focused_buf_mut().delete_text_range(start, end) {
-                        self.yank_to_register(&deleted);
-                        self.focused_buf_mut().break_undo_group();
-                    }
-                    if is_change {
-                        self.mode = EditorMode::Insert;
-                    }
-                }
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::Echo(msg) => {
-                self.status_message = Some(msg);
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::PluginList => {
-                let list = self.plugins.list();
-                if list.is_empty() {
-                    self.status_message = Some("No plugins loaded".to_string());
-                } else {
-                    let items: Vec<String> = list.iter().map(|(id, name, enabled, builtin)| {
-                        let status = if *enabled { "+" } else { "-" };
-                        let kind = if *builtin { "builtin" } else { "user" };
-                        format!("[{}] {} ({}, {})", status, id, name, kind)
-                    }).collect();
-                    self.status_message = Some(items.join(" | "));
-                }
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::DotRepeat => {
-                if let Some(edit) = self.last_edit.clone() {
-                    let saved = edit.clone();
-                    // Replay the edit command
-                    self.execute(edit.command.clone(), screen_area)?;
-                    // If it had insert text, replay those too
-                    if !edit.insert_text.is_empty() {
-                        for insert_cmd in &edit.insert_text {
-                            self.execute(insert_cmd.clone(), screen_area)?;
-                        }
-                        // Return to normal mode
-                        self.execute(EditorCommand::SwitchMode(EditorMode::Normal), screen_area)?;
-                    }
-                    // Restore the edit record (replay shouldn't overwrite it)
-                    self.last_edit = Some(saved);
-                } else {
-                    self.status_message = Some("No last edit to repeat".to_string());
-                }
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::SelectRegister(c) => {
-                self.pending_register = Some(c);
-                self.status_message = Some(format!("\"{}",c));
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::YankLines(n) => {
-                // Yank N lines starting at cursor (without deleting)
-                let buf = self.focused_buf();
-                let start = buf.cursor().line;
-                let mut text = String::new();
-                for i in start..start + n {
-                    if let Some(line) = buf.get_line(i) {
-                        text.push_str(&line);
-                        text.push('\n');
-                    }
-                }
-                if !text.is_empty() {
-                    self.yank_to_register(&text);
-                    self.status_message = Some(format!("{} line(s) yanked", n));
-                }
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::YankMotion(_dir, _n) => {
-                // For now, yank = copy the text that would be deleted by the motion
-                // This is a simplified version — just yank the current line for most motions
-                let buf = self.focused_buf();
-                let cursor = buf.cursor();
-                if let Some(line) = buf.get_line(cursor.line) {
-                    self.yank_to_register(&line);
-                    self.status_message = Some("Yanked".to_string());
-                }
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::JumpBack => {
-                if self.jump_index > 0 {
-                    self.jump_index -= 1;
-                    if let Some((path, pos)) = self.jump_list.get(self.jump_index).cloned() {
-                        let current_name = self.focused_buf().display_name();
-                        if path != current_name {
-                            let _ = self.handle_edit_file(&path);
-                        }
-                        self.focused_buf_mut().set_cursor_pos(pos);
+                self.macros.last_register = Some(actual_reg);
+
+                if let Some(keys) = self.macros.registers.get(&actual_reg).cloned() {
+                    self.status_message = Some(format!("Replaying @{} ({} keys)", actual_reg, keys.len()));
+                    for key in keys {
+                        let in_terminal = self.focused_buf().is_terminal();
+                        let popup_showing = self.show_help || self.tabs[self.active_tab].show_buffer_list;
+                        let (cmd, new_input_state) =
+                            key_to_command(self.mode, self.input_state, key, in_terminal, popup_showing, false);
+                        self.input_state = new_input_state;
+                        self.execute(cmd, screen_area)?;
                     }
                 } else {
-                    self.status_message = Some("Already at oldest jump".to_string());
+                    self.status_message = Some(format!("Register @{} is empty", actual_reg));
                 }
                 Ok(ExecOutcome::Continue)
             }
-            EditorCommand::JumpForward => {
-                if self.jump_index + 1 < self.jump_list.len() {
-                    self.jump_index += 1;
-                    if let Some((path, pos)) = self.jump_list.get(self.jump_index).cloned() {
-                        let current_name = self.focused_buf().display_name();
-                        if path != current_name {
-                            let _ = self.handle_edit_file(&path);
-                        }
-                        self.focused_buf_mut().set_cursor_pos(pos);
-                    }
-                } else {
-                    self.status_message = Some("Already at newest jump".to_string());
-                }
-                Ok(ExecOutcome::Continue)
-            }
+            _ => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    fn execute_marks_jumps(&mut self, cmd: EditorCommand) -> Result<ExecOutcome, NovimError> {
+        match cmd {
             EditorCommand::SetMark(c) => {
                 let path = self.focused_buf().display_name();
                 let pos = self.focused_buf().cursor();
@@ -1707,32 +1980,9 @@ impl EditorState {
                 }
                 Ok(ExecOutcome::Continue)
             }
-            EditorCommand::SourceFile(path) => {
-                let resolved = if path.starts_with('/') || path.starts_with('~') {
-                    let p = path.replace('~', &std::env::var("HOME").unwrap_or_default());
-                    std::path::PathBuf::from(p)
-                } else {
-                    self.tabs[self.active_tab].shell_cwd().join(&path)
-                };
-                self.plugins.reload_file(&resolved);
-                self.status_message = Some(format!("Reloaded: {}", resolved.display()));
-                Ok(ExecOutcome::Continue)
-            }
-            EditorCommand::PluginCommand(name, args) => {
-                if self.plugins.has_command(&name) {
-                    let snapshot = self.make_buffer_snapshot();
-                    let event = crate::plugin::EditorEvent::CommandExecuted {
-                        command: if args.is_empty() { name.clone() } else { format!("{} {}", name, args) },
-                    };
-                    let actions = self.plugins.dispatch(&event, &snapshot);
-                    self.run_plugin_actions(actions, screen_area);
-                    Ok(ExecOutcome::Continue)
-                } else {
-                    self.status_message = Some(format!("Unknown command: {}", name));
-                    Ok(ExecOutcome::Continue)
-                }
-            }
-            EditorCommand::Noop => Ok(ExecOutcome::Continue),
+            EditorCommand::JumpBack => self.navigate_jump_list(false),
+            EditorCommand::JumpForward => self.navigate_jump_list(true),
+            _ => Ok(ExecOutcome::Continue),
         }
     }
 
@@ -1800,49 +2050,28 @@ impl EditorState {
     /// Poll all LSP clients for events in the active workspace.
     pub fn poll_active_lsp(&mut self) {
         let idx = self.active_tab;
+        let result = self.tabs[idx].poll_lsp_events();
 
-        let client_ids: Vec<String> = self.tabs[idx].lsp_clients.keys().cloned().collect();
-        for lang_id in client_ids {
-            if let Some(client) = self.tabs[idx].lsp_clients.get_mut(&lang_id) {
-                let events = client.poll();
-                for event in events {
-                    match event {
-                        LspEvent::Diagnostics { uri, diagnostics } => {
-                            self.tabs[idx].diagnostics.insert(uri, diagnostics);
-                        }
-                        LspEvent::GotoDefinitionResponse { uri, line, col } => {
-                            self.tabs[idx].pending_goto = Some((uri, line, col));
-                        }
-                        LspEvent::HoverResponse { contents } => {
-                            self.hover_text = Some(contents);
-                        }
-                        LspEvent::CompletionResponse { items } => {
-                            if !items.is_empty() {
-                                self.status_message = Some(format!("{} completions received", items.len()));
-                                self.completion.items = items;
-                                self.completion.selected = 0;
-                                self.completion.visible = true;
-                            } else {
-                                self.status_message = Some("No completions available".to_string());
-                            }
-                        }
-                        LspEvent::ServerError(msg) => {
-                            self.status_message = Some(format!("LSP: {}", msg));
-                        }
-                        LspEvent::Progress { message } => {
-                            self.tabs[idx].lsp_status = Some(message);
-                        }
-                        LspEvent::ServerExited => {
-                            self.tabs[idx].lsp_status = Some("exited".to_string());
-                            self.status_message = Some(format!("LSP [{}] exited", lang_id));
-                        }
-                        LspEvent::Initialized => {
-                            self.tabs[idx].lsp_status = Some("Ready".to_string());
-                            self.status_message = Some(format!("LSP [{}] ready", lang_id));
-                        }
-                    }
-                }
-            }
+        for (uri, diags) in result.diagnostics {
+            self.tabs[idx].diagnostics.insert(uri, diags);
+        }
+        if let Some(goto) = result.goto {
+            self.tabs[idx].pending_goto = Some(goto);
+        }
+        if let Some(hover) = result.hover {
+            self.hover_text = Some(hover);
+        }
+        if let Some(items) = result.completions {
+            self.status_message = Some(format!("{} completions received", items.len()));
+            self.completion.items = items;
+            self.completion.selected = 0;
+            self.completion.visible = true;
+        }
+        if let Some(msg) = result.status_messages.last() {
+            self.tabs[idx].lsp_status = Some(msg.clone());
+        }
+        for msg in &result.status_messages {
+            self.status_message = Some(msg.clone());
         }
 
         // Handle pending goto-definition

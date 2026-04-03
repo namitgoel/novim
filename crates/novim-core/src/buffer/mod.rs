@@ -132,27 +132,36 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    /// Create a new empty buffer
-    pub fn new() -> Self {
+    fn new_with_parts(
+        rope: Rope,
+        file_path: Option<PathBuf>,
+        highlighter: Option<SyntaxHighlighter>,
+        last_modified: Option<std::time::SystemTime>,
+    ) -> Self {
         Self {
-            rope: Rope::new(),
+            rope,
             cursor: Position::zero(),
             secondary_cursors: Vec::new(),
             dirty: false,
-            file_path: None,
+            file_path,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             current_group: None,
             selection: None,
-            highlighter: None,
+            highlighter,
             cached_highlights: Vec::new(),
             highlights_dirty: true,
             folds: FoldState::new(),
             cached_text: None,
             version: 0,
             git_signs: std::collections::HashMap::new(),
-            last_modified: None,
+            last_modified,
         }
+    }
+
+    /// Create a new empty buffer
+    pub fn new() -> Self {
+        Self::new_with_parts(Rope::new(), None, None, None)
     }
 
     /// Load a buffer from a file, or create empty buffer if file doesn't exist
@@ -172,25 +181,7 @@ impl Buffer {
         let last_modified = fs::metadata(&path_buf).ok()
             .and_then(|m| m.modified().ok());
 
-        Ok(Self {
-            rope,
-            cursor: Position::zero(),
-            secondary_cursors: Vec::new(),
-            dirty: false,
-            file_path: Some(path_buf),
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            current_group: None,
-            selection: None,
-            highlighter,
-            cached_highlights: Vec::new(),
-            highlights_dirty: true,
-            folds: FoldState::new(),
-            cached_text: None,
-            version: 0,
-            git_signs: std::collections::HashMap::new(),
-            last_modified,
-        })
+        Ok(Self::new_with_parts(rope, Some(path_buf), highlighter, last_modified))
     }
 
     pub fn file_path_str(&self) -> Option<&str> {
@@ -223,8 +214,12 @@ impl Buffer {
     }
 
     /// Get the full document text (for LSP didOpen/didChange).
+    /// Uses the cached text if available, otherwise materializes from rope.
     pub fn full_text(&self) -> String {
-        self.rope.to_string()
+        match &self.cached_text {
+            Some(s) => s.clone(),
+            None => self.rope.to_string(),
+        }
     }
 
     /// Get cached text representation, materializing from rope only if dirty.

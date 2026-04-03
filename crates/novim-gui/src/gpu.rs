@@ -294,17 +294,18 @@ impl GpuState {
             },
         );
 
-        self.text_renderer
-            .prepare(
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                text_areas.iter().cloned(),
-                &mut self.swash_cache,
-            )
-            .expect("Failed to prepare text rendering");
+        if let Err(e) = self.text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            text_areas.iter().cloned(),
+            &mut self.swash_cache,
+        ) {
+            log::error!("Failed to prepare text rendering: {}", e);
+            return;
+        }
 
         // Build background vertex buffer from rects.
         let w = self.physical_width as f32;
@@ -385,9 +386,9 @@ impl GpuState {
             }
 
             // Draw text on top.
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)
-                .expect("Failed to render text");
+            if let Err(e) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
+                log::error!("Failed to render text: {}", e);
+            }
         }
 
         self.queue.submit(Some(encoder.finish()));

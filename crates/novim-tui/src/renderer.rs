@@ -3,6 +3,7 @@
 use novim_core::config;
 use novim_core::emulator::grid::{CellAttrs, CellColor};
 use novim_core::highlight::HighlightGroup;
+use novim_core::text_utils::{expand_tabs, display_col};
 use novim_core::welcome;
 use novim_types::EditorMode;
 use ratatui::{
@@ -15,44 +16,6 @@ use ratatui::{
 use novim_core::pane::Pane;
 
 use super::EditorState;
-
-/// Expand tab characters to spaces based on tab width.
-fn expand_tabs(line: &str, tab_width: usize) -> String {
-    if !line.contains('\t') {
-        return line.to_string();
-    }
-    let mut result = String::with_capacity(line.len());
-    let mut col = 0;
-    for c in line.chars() {
-        if c == '\t' {
-            let spaces = tab_width - (col % tab_width);
-            for _ in 0..spaces {
-                result.push(' ');
-            }
-            col += spaces;
-        } else {
-            result.push(c);
-            col += 1;
-        }
-    }
-    result
-}
-
-/// Calculate display column accounting for tab expansion.
-fn display_col(line: &str, cursor_col: usize, tab_width: usize) -> usize {
-    let mut display = 0;
-    for (i, c) in line.chars().enumerate() {
-        if i >= cursor_col {
-            break;
-        }
-        if c == '\t' {
-            display += tab_width - (display % tab_width);
-        } else {
-            display += 1;
-        }
-    }
-    display
-}
 
 /// How many screen rows a line occupies when wrapped.
 fn wrapped_row_count(line: &str, width: usize) -> usize {
@@ -252,10 +215,10 @@ fn render_panes(f: &mut ratatui::Frame, area: Rect, state: &mut EditorState, bor
     let ln_mode = state.line_number_mode;
     let focused_color = config_color_to_ratatui(config::parse_color(&state.config.theme.focused_border));
     let unfocused_color = config_color_to_ratatui(config::parse_color(&state.config.theme.unfocused_border));
-    let syntax_theme = state.config.syntax_theme.clone();
+    let syntax_theme = &state.config.syntax_theme;
     let tab_width = state.config.editor.tab_width;
     let word_wrap = state.config.editor.word_wrap;
-    let search_pattern = state.search.pattern.clone();
+    let search_pattern = state.search.pattern.as_deref();
     let core_area = novim_types::Rect::new(area.x, area.y, area.width, area.height);
     let layouts = state.tabs[idx].panes.layout(core_area);
 
@@ -273,7 +236,7 @@ fn render_panes(f: &mut ratatui::Frame, area: Rect, state: &mut EditorState, bor
         let diags = diag_uri.and_then(|uri| ws.diagnostics.get(&uri));
         if let Some(pane) = ws.panes.get_pane_mut(*pane_id) {
             let border_color = if is_focused { focused_color } else { unfocused_color };
-            render_single_pane(f, ratatui_rect, pane, is_focused, ln_mode, border_color, diags, search_pattern.as_deref(), &syntax_theme, tab_width, word_wrap, borderless);
+            render_single_pane(f, ratatui_rect, pane, is_focused, ln_mode, border_color, diags, search_pattern, syntax_theme, tab_width, word_wrap, borderless);
         }
     }
 }
@@ -370,7 +333,7 @@ fn render_single_pane(
         }
 
         let raw_line = content.get_line(line_num).unwrap_or_default();
-        let line_content = expand_tabs(&raw_line, tab_width);
+        let line_content = expand_tabs(&raw_line, tab_width).into_owned();
 
         // Show fold indicator if this line starts a collapsed fold
         let fold_indicator = fold_state.and_then(|fs| {
@@ -1384,6 +1347,20 @@ fn cell_to_style(fg: CellColor, bg: CellColor, attrs: CellAttrs) -> Style {
     style
 }
 
+/// Snap a byte offset to the nearest char boundary (rounding down).
+fn snap_to_char_boundary(s: &str, byte_idx: usize) -> usize {
+    let idx = byte_idx.min(s.len());
+    if s.is_char_boundary(idx) {
+        return idx;
+    }
+    // Walk backwards to find the start of the char
+    let mut i = idx;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 /// Apply syntax highlight spans to a line.
 fn apply_highlights(content: &str, spans: &[novim_core::highlight::HighlightSpan], theme: &config::SyntaxTheme) -> Vec<Span<'static>> {
     if spans.is_empty() {
@@ -1394,8 +1371,8 @@ fn apply_highlights(content: &str, spans: &[novim_core::highlight::HighlightSpan
     let mut pos = 0;
 
     for span in spans {
-        let start = span.start.min(content.len());
-        let end = span.end.min(content.len());
+        let start = snap_to_char_boundary(content, span.start);
+        let end = snap_to_char_boundary(content, span.end);
 
         // Text before this span (unhighlighted)
         if pos < start {

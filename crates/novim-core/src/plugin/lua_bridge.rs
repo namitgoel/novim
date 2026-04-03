@@ -62,6 +62,51 @@ impl LuaPlugin {
         let novim = self.lua.create_table()
             .map_err(|e| format!("Failed to create novim table: {}", e))?;
 
+        // ── Helper: push a structured action into _action_queue ──
+        let push_action_fn = self.lua.create_function(|lua, action: mlua::Table| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let queue: mlua::Table = match novim.get::<Value>("_action_queue")? {
+                Value::Table(t) => t,
+                _ => {
+                    let t = lua.create_table()?;
+                    novim.set("_action_queue", t.clone())?;
+                    t
+                }
+            };
+            let len = queue.len()?;
+            queue.set(len + 1, action)?;
+            Ok(())
+        }).map_err(|e| format!("Failed to create _push_action: {}", e))?;
+        novim.set("_push_action", push_action_fn)
+            .map_err(|e| format!("Failed to set _push_action: {}", e))?;
+
+        // Set up each API subsystem
+        self.setup_event_system(&novim)?;
+        self.setup_buf_api(&novim)?;
+        self.setup_fn_api(&novim)?;
+        self.setup_ui_api(&novim)?;
+        self.setup_opt_api(&novim)?;
+        self.setup_win_api(&novim)?;
+        self.setup_keymap_api(&novim)?;
+        self.setup_misc_api(&novim)?;
+
+        // Set global
+        self.lua.globals().set("novim", novim)
+            .map_err(|e| format!("Failed to set global novim: {}", e))?;
+
+        // Execute the plugin script
+        let source = std::fs::read_to_string(&self.path)
+            .map_err(|e| format!("Failed to re-read {}: {}", self.path.display(), e))?;
+        self.lua.load(&source)
+            .set_name(self.id.as_str())
+            .exec()
+            .map_err(|e| format!("Lua runtime error in {}: {}", self.path.display(), e))?;
+
+        Ok(())
+    }
+
+    /// Set up event handlers table, commands table, `novim.on()`, `novim.register_command()`, and `novim.exec()`.
+    fn setup_event_system(&self, novim: &mlua::Table) -> Result<(), String> {
         // novim.event_handlers: { event_name => [handler_fn, ...] }
         let handlers = self.lua.create_table()
             .map_err(|e| format!("Failed to create handlers table: {}", e))?;
@@ -156,24 +201,11 @@ impl LuaPlugin {
         novim.set("exec", exec_fn)
             .map_err(|e| format!("Failed to set novim.exec: {}", e))?;
 
-        // ── Helper: push a structured action into _action_queue ──
-        let push_action_fn = self.lua.create_function(|lua, action: mlua::Table| {
-            let novim: mlua::Table = lua.globals().get("novim")?;
-            let queue: mlua::Table = match novim.get::<Value>("_action_queue")? {
-                Value::Table(t) => t,
-                _ => {
-                    let t = lua.create_table()?;
-                    novim.set("_action_queue", t.clone())?;
-                    t
-                }
-            };
-            let len = queue.len()?;
-            queue.set(len + 1, action)?;
-            Ok(())
-        }).map_err(|e| format!("Failed to create _push_action: {}", e))?;
-        novim.set("_push_action", push_action_fn)
-            .map_err(|e| format!("Failed to set _push_action: {}", e))?;
+        Ok(())
+    }
 
+    /// Set up `novim.buf.*` including the Selection API additions.
+    fn setup_buf_api(&self, novim: &mlua::Table) -> Result<(), String> {
         // ── novim.buf — buffer read/write API ──
         let buf = self.lua.create_table()
             .map_err(|e| format!("Failed to create buf table: {}", e))?;
@@ -290,6 +322,66 @@ impl LuaPlugin {
         novim.set("buf", buf)
             .map_err(|e| format!("Failed to set novim.buf: {}", e))?;
 
+        // ── Selection API additions to novim.buf ──
+        let buf_table: mlua::Table = novim.get("buf")
+            .map_err(|e| format!("Failed to get buf table: {}", e))?;
+
+        buf_table.set("get_selection", self.lua.create_function(|lua, ()| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let snap: mlua::Table = novim.get("_snapshot")?;
+            match snap.get::<Value>("selection")? {
+                Value::Table(sel) => {
+                    let result = lua.create_table()?;
+                    result.set("start_line", sel.get::<usize>("start_line")?)?;
+                    result.set("start_col", sel.get::<usize>("start_col")?)?;
+                    result.set("end_line", sel.get::<usize>("end_line")?)?;
+                    result.set("end_col", sel.get::<usize>("end_col")?)?;
+                    Ok(Value::Table(result))
+                }
+                _ => Ok(Value::Nil),
+            }
+        }).map_err(|e| format!("buf.get_selection: {}", e))?)
+            .map_err(|e| format!("set buf.get_selection: {}", e))?;
+
+        buf_table.set("selected_text", self.lua.create_function(|lua, ()| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let snap: mlua::Table = novim.get("_snapshot")?;
+            match snap.get::<Value>("selected_text")? {
+                Value::String(s) => Ok(Value::String(s)),
+                _ => Ok(Value::Nil),
+            }
+        }).map_err(|e| format!("buf.selected_text: {}", e))?)
+            .map_err(|e| format!("set buf.selected_text: {}", e))?;
+
+        buf_table.set("set_selection", self.lua.create_function(|lua, (sl, sc, el, ec): (usize, usize, usize, usize)| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let push: Function = novim.get("_push_action")?;
+            let action = lua.create_table()?;
+            action.set("type", "set_selection")?;
+            action.set("start_line", sl)?;
+            action.set("start_col", sc)?;
+            action.set("end_line", el)?;
+            action.set("end_col", ec)?;
+            push.call::<()>(action)?;
+            Ok(())
+        }).map_err(|e| format!("buf.set_selection: {}", e))?)
+            .map_err(|e| format!("set buf.set_selection: {}", e))?;
+
+        buf_table.set("clear_selection", self.lua.create_function(|lua, ()| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let push: Function = novim.get("_push_action")?;
+            let action = lua.create_table()?;
+            action.set("type", "clear_selection")?;
+            push.call::<()>(action)?;
+            Ok(())
+        }).map_err(|e| format!("buf.clear_selection: {}", e))?)
+            .map_err(|e| format!("set buf.clear_selection: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Set up `novim.fn.*` (shell, readfile, writefile, glob).
+    fn setup_fn_api(&self, novim: &mlua::Table) -> Result<(), String> {
         // ── novim.fn — shell, filesystem utilities ──
         let fns = self.lua.create_table()
             .map_err(|e| format!("Failed to create fn table: {}", e))?;
@@ -349,6 +441,11 @@ impl LuaPlugin {
         novim.set("fn", fns)
             .map_err(|e| format!("Failed to set novim.fn: {}", e))?;
 
+        Ok(())
+    }
+
+    /// Set up `novim.ui.*` (status, log, popup).
+    fn setup_ui_api(&self, novim: &mlua::Table) -> Result<(), String> {
         // ── novim.ui — status/notification API ──
         let ui = self.lua.create_table()
             .map_err(|e| format!("Failed to create ui table: {}", e))?;
@@ -431,6 +528,11 @@ impl LuaPlugin {
         novim.set("ui", ui)
             .map_err(|e| format!("Failed to set novim.ui: {}", e))?;
 
+        Ok(())
+    }
+
+    /// Set up `novim.opt.*` (get, set).
+    fn setup_opt_api(&self, novim: &mlua::Table) -> Result<(), String> {
         // ── novim.opt — editor options read/write ──
         let opt = self.lua.create_table()
             .map_err(|e| format!("Failed to create opt table: {}", e))?;
@@ -501,6 +603,11 @@ impl LuaPlugin {
         novim.set("opt", opt)
             .map_err(|e| format!("Failed to set novim.opt: {}", e))?;
 
+        Ok(())
+    }
+
+    /// Set up `novim.win.*` (split, close, count).
+    fn setup_win_api(&self, novim: &mlua::Table) -> Result<(), String> {
         // ── novim.win — window/pane API ──
         let win = self.lua.create_table()
             .map_err(|e| format!("Failed to create win table: {}", e))?;
@@ -544,61 +651,11 @@ impl LuaPlugin {
         novim.set("win", win)
             .map_err(|e| format!("Failed to set novim.win: {}", e))?;
 
-        // ── Selection API additions to novim.buf ──
-        let buf_table: mlua::Table = novim.get("buf")
-            .map_err(|e| format!("Failed to get buf table: {}", e))?;
+        Ok(())
+    }
 
-        buf_table.set("get_selection", self.lua.create_function(|lua, ()| {
-            let novim: mlua::Table = lua.globals().get("novim")?;
-            let snap: mlua::Table = novim.get("_snapshot")?;
-            match snap.get::<Value>("selection")? {
-                Value::Table(sel) => {
-                    let result = lua.create_table()?;
-                    result.set("start_line", sel.get::<usize>("start_line")?)?;
-                    result.set("start_col", sel.get::<usize>("start_col")?)?;
-                    result.set("end_line", sel.get::<usize>("end_line")?)?;
-                    result.set("end_col", sel.get::<usize>("end_col")?)?;
-                    Ok(Value::Table(result))
-                }
-                _ => Ok(Value::Nil),
-            }
-        }).map_err(|e| format!("buf.get_selection: {}", e))?)
-            .map_err(|e| format!("set buf.get_selection: {}", e))?;
-
-        buf_table.set("selected_text", self.lua.create_function(|lua, ()| {
-            let novim: mlua::Table = lua.globals().get("novim")?;
-            let snap: mlua::Table = novim.get("_snapshot")?;
-            match snap.get::<Value>("selected_text")? {
-                Value::String(s) => Ok(Value::String(s)),
-                _ => Ok(Value::Nil),
-            }
-        }).map_err(|e| format!("buf.selected_text: {}", e))?)
-            .map_err(|e| format!("set buf.selected_text: {}", e))?;
-
-        buf_table.set("set_selection", self.lua.create_function(|lua, (sl, sc, el, ec): (usize, usize, usize, usize)| {
-            let novim: mlua::Table = lua.globals().get("novim")?;
-            let push: Function = novim.get("_push_action")?;
-            let action = lua.create_table()?;
-            action.set("type", "set_selection")?;
-            action.set("start_line", sl)?;
-            action.set("start_col", sc)?;
-            action.set("end_line", el)?;
-            action.set("end_col", ec)?;
-            push.call::<()>(action)?;
-            Ok(())
-        }).map_err(|e| format!("buf.set_selection: {}", e))?)
-            .map_err(|e| format!("set buf.set_selection: {}", e))?;
-
-        buf_table.set("clear_selection", self.lua.create_function(|lua, ()| {
-            let novim: mlua::Table = lua.globals().get("novim")?;
-            let push: Function = novim.get("_push_action")?;
-            let action = lua.create_table()?;
-            action.set("type", "clear_selection")?;
-            push.call::<()>(action)?;
-            Ok(())
-        }).map_err(|e| format!("buf.clear_selection: {}", e))?)
-            .map_err(|e| format!("set buf.clear_selection: {}", e))?;
-
+    /// Set up `novim.keymap(mode, key, action)`.
+    fn setup_keymap_api(&self, novim: &mlua::Table) -> Result<(), String> {
         // ── novim.keymap(mode, key, action) — register a keybinding ──
         // action can be a string (ex-command) or a function (Lua callback)
         let keymap_callbacks = self.lua.create_table()
@@ -634,6 +691,11 @@ impl LuaPlugin {
         novim.set("keymap", keymap_fn)
             .map_err(|e| format!("Failed to set novim.keymap: {}", e))?;
 
+        Ok(())
+    }
+
+    /// Set up `novim.emit`, `novim.schedule`, `novim.defer`, and `novim.lsp`.
+    fn setup_misc_api(&self, novim: &mlua::Table) -> Result<(), String> {
         // ── novim.emit(event_name, data) — emit custom event to all plugins ──
         let emit_fn = self.lua.create_function(|lua, (name, data): (String, Option<mlua::Table>)| {
             let novim: mlua::Table = lua.globals().get("novim")?;
@@ -716,18 +778,6 @@ impl LuaPlugin {
 
         novim.set("lsp", lsp)
             .map_err(|e| format!("Failed to set novim.lsp: {}", e))?;
-
-        // Set global
-        self.lua.globals().set("novim", novim)
-            .map_err(|e| format!("Failed to set global novim: {}", e))?;
-
-        // Execute the plugin script
-        let source = std::fs::read_to_string(&self.path)
-            .map_err(|e| format!("Failed to re-read {}: {}", self.path.display(), e))?;
-        self.lua.load(&source)
-            .set_name(self.id.as_str())
-            .exec()
-            .map_err(|e| format!("Lua runtime error in {}: {}", self.path.display(), e))?;
 
         Ok(())
     }
@@ -977,7 +1027,7 @@ impl LuaPlugin {
             .as_millis() as u64;
 
         if let Ok(Value::Table(deferred)) = novim.get::<Value>("_deferred") {
-            let remaining = self.lua.create_table().unwrap();
+            let Ok(remaining) = self.lua.create_table() else { return self.drain_actions() };
             let mut remaining_idx = 1;
 
             for pair in deferred.clone().pairs::<i64, mlua::Table>() {

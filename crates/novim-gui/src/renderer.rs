@@ -9,6 +9,7 @@ use novim_core::config::{self, SyntaxTheme};
 use novim_core::editor::{EditorState, LineNumberMode};
 use novim_core::highlight::HighlightGroup;
 use novim_core::pane::{Pane, PaneContent};
+use novim_core::text_utils::{expand_tabs, display_col};
 use novim_core::welcome;
 use novim_types::EditorMode;
 use std::hash::{Hash, Hasher};
@@ -1278,6 +1279,19 @@ fn render_explorer(editor: &EditorState, cols: usize, rows: usize) -> Vec<Vec<Ri
 
 // ── Syntax highlighting ───────────────────────────────────────────────────────
 
+/// Snap a byte offset to the nearest char boundary (rounding down).
+fn snap_to_char_boundary(s: &str, byte_idx: usize) -> usize {
+    let idx = byte_idx.min(s.len());
+    if s.is_char_boundary(idx) {
+        return idx;
+    }
+    let mut i = idx;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 fn apply_syntax_highlights(
     content: &str,
     spans: &[novim_core::highlight::HighlightSpan],
@@ -1291,8 +1305,8 @@ fn apply_syntax_highlights(
     let mut pos = 0;
 
     for span in spans {
-        let start = span.start.min(content.len());
-        let end = span.end.min(content.len());
+        let start = snap_to_char_boundary(content, span.start);
+        let end = snap_to_char_boundary(content, span.end);
 
         if pos < start {
             result.push(RichSpan { text: content[pos..start].to_string(), color: FG });
@@ -1608,37 +1622,7 @@ fn apply_cursor_to_spans(spans: &mut Vec<RichSpan>, target_col: usize) {
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
-fn expand_tabs(line: &str, tab_width: usize) -> String {
-    if !line.contains('\t') {
-        return line.to_string();
-    }
-    let mut result = String::with_capacity(line.len());
-    let mut col = 0;
-    for c in line.chars() {
-        if c == '\t' {
-            let spaces = tab_width - (col % tab_width);
-            for _ in 0..spaces { result.push(' '); }
-            col += spaces;
-        } else {
-            result.push(c);
-            col += 1;
-        }
-    }
-    result
-}
-
-fn display_col(line: &str, cursor_col: usize, tab_width: usize) -> usize {
-    let mut display = 0;
-    for (i, c) in line.chars().enumerate() {
-        if i >= cursor_col { break; }
-        if c == '\t' {
-            display += tab_width - (display % tab_width);
-        } else {
-            display += 1;
-        }
-    }
-    display
-}
+// expand_tabs and display_col are imported from novim_core::text_utils
 
 fn truncate_str(s: &str, max_chars: usize) -> String {
     let chars: Vec<char> = s.chars().collect();

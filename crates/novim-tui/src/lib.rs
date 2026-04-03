@@ -58,6 +58,11 @@ impl TerminalManager {
         })
     }
 
+    fn screen_area(&self) -> io::Result<novim_types::Rect> {
+        let size = self.terminal.size()?;
+        Ok(novim_types::Rect::new(0, 0, size.width, size.height))
+    }
+
     /// Execute a command, displaying errors as status messages. Returns true if should quit.
     fn exec(&mut self, cmd: EditorCommand, screen_area: novim_types::Rect) -> bool {
         match self.state.execute(cmd, screen_area) {
@@ -99,8 +104,7 @@ impl TerminalManager {
             // Poll plugin scheduled/deferred callbacks
             let timer_actions = self.state.plugins.poll_timers();
             if !timer_actions.is_empty() {
-                let size = self.terminal.size()?;
-                let screen_area = novim_types::Rect::new(0, 0, size.width, size.height);
+                let screen_area = self.screen_area()?;
                 self.state.run_plugin_actions(timer_actions, screen_area);
             }
 
@@ -125,8 +129,7 @@ impl TerminalManager {
                             };
                             if let Some(cmd) = cmd {
                                 self.state.show_welcome = false;
-                                let size = self.terminal.size()?;
-                                let screen_area = novim_types::Rect::new(0, 0, size.width, size.height);
+                                let screen_area = self.screen_area()?;
                                 if self.exec(cmd, screen_area) {
                                     break;
                                 }
@@ -145,8 +148,7 @@ impl TerminalManager {
                                 KeyCode::Char(c) => EditorCommand::FinderInput(c),
                                 _ => EditorCommand::Noop,
                             };
-                            let size = self.terminal.size()?;
-                            let screen_area = novim_types::Rect::new(0, 0, size.width, size.height);
+                            let screen_area = self.screen_area()?;
                             self.exec(cmd, screen_area);
                             continue;
                         }
@@ -167,8 +169,7 @@ impl TerminalManager {
                                 }
                             };
                             if !matches!(cmd, EditorCommand::Noop) {
-                                let size = self.terminal.size()?;
-                                let screen_area = novim_types::Rect::new(0, 0, size.width, size.height);
+                                let screen_area = self.screen_area()?;
                                 self.exec(cmd, screen_area);
                                 continue;
                             }
@@ -222,8 +223,7 @@ impl TerminalManager {
                                     continue;
                                 }
                                 KeyCode::Enter => {
-                                    let size = self.terminal.size()?;
-                                    let screen_area = novim_types::Rect::new(0, 0, size.width, size.height);
+                                    let screen_area = self.screen_area()?;
                                     self.state.handle_popup_select(screen_area);
                                     continue;
                                 }
@@ -282,8 +282,7 @@ impl TerminalManager {
                                 }
                                 _ => EditorCommand::Noop,
                             };
-                            let size = self.terminal.size()?;
-                            let screen_area = novim_types::Rect::new(0, 0, size.width, size.height);
+                            let screen_area = self.screen_area()?;
                             self.exec(cmd, screen_area);
                             continue;
                         }
@@ -297,8 +296,7 @@ impl TerminalManager {
                                 KeyCode::Char(c) => EditorCommand::SearchInput(c),
                                 _ => EditorCommand::Noop,
                             };
-                            let size = self.terminal.size()?;
-                            let screen_area = novim_types::Rect::new(0, 0, size.width, size.height);
+                            let screen_area = self.screen_area()?;
                             self.exec(cmd, screen_area);
                             continue;
                         }
@@ -314,8 +312,7 @@ impl TerminalManager {
                         let key_str = key_to_string(&key);
                         let mode_str = self.state.mode.display_name();
                         if !key_str.is_empty() {
-                            let size = self.terminal.size()?;
-                            let screen_area = novim_types::Rect::new(0, 0, size.width, size.height);
+                            let screen_area = self.screen_area()?;
                             if self.state.try_plugin_keymap(mode_str, &key_str, screen_area) {
                                 self.state.input_state = InputState::Ready;
                                 continue;
@@ -354,10 +351,7 @@ impl TerminalManager {
                                 EditorCommand::ChangeMotion(dir, _) => EditorCommand::ChangeMotion(dir, count),
                                 EditorCommand::DeleteLines(_) => EditorCommand::DeleteLines(count),
                                 EditorCommand::ChangeLines(_) => EditorCommand::ChangeLines(count),
-                                EditorCommand::ScrollUp => {
-                                    for _ in 0..count { /* handled below */ }
-                                    cmd
-                                }
+                                EditorCommand::ScrollUp | EditorCommand::ScrollDown => cmd,
                                 other => other,
                             }
                         } else {
@@ -382,15 +376,13 @@ impl TerminalManager {
                             self.state.macros.buffer.push(key);
                         }
 
-                        let size = self.terminal.size()?;
-                        let screen_area = novim_types::Rect::new(0, 0, size.width, size.height);
+                        let screen_area = self.screen_area()?;
                         if self.exec(cmd, screen_area) {
                             break;
                         }
                     }
                     Event::Mouse(mouse) => {
-                        let size = self.terminal.size()?;
-                        let screen_area = novim_types::Rect::new(0, 0, size.width, size.height);
+                        let screen_area = self.screen_area()?;
                         self.state.handle_mouse(mouse, screen_area);
                     }
                     _ => {}
