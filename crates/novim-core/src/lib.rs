@@ -21,5 +21,6 @@ pub mod input;
 pub mod git;
 pub mod pane;
 pub mod session;
+pub mod plugin;
 pub mod url;
 pub mod welcome;

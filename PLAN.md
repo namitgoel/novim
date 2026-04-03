@@ -269,14 +269,187 @@ cargo build --release -p novim-neon
 
 ---
 
+## v0.3.0 — Complete
+
+### Clean Code & Bug Fixes
+- Fixed 39 clippy warnings → 0
+- Fixed UTF-8 panic risk in TUI file finder (byte-slicing → char-based)
+- Fixed byte/char mismatch in GUI renderer padding
+- Simplified redundant conditions (GUI Cmd shortcut logic)
+- Added `#[derive(Debug, Clone)]` on `EditorCommand`
+
+### Welcome Screen
+- ASCII logo + shortcut hints (e/t/f/?/q)
+- TUI-only — persistent until user picks an action
+- GUI opens terminal directly (iTerm/Kitty behavior)
+
+### TUI Startup Behavior
+- `novim` → welcome screen
+- `novim <file>` → editor
+- `novim <dir>` → explorer sidebar + empty panel
+- Terminal panes open only via commands
+
+### GUI Improvements
+- Syntax highlighting / text coloring working
+- Popup overlay preserves syntax colors behind it
+- `:q` respawns terminal instead of closing GUI window
+- No status bar in pure terminal mode
+- Removed `is_pure_terminal` fast path that broke popups
+- Renderer split: `render_terminal_mode()` + `render_editor_mode()`
+- Extracted shared `apply_popup_overlays()` + `flatten_screen_lines()`
+
+### Ctrl+W Fix
+- Added `gui_mode: bool` param to `key_to_command()`
+- GUI: Ctrl+W in terminal forwards to PTY (delete word)
+- TUI: Ctrl+W still works as pane command prefix
+
+### Vim Motions
+- `w` (word forward), `b` (word backward), `e` (end of word)
+- `0` (line start), `$` (line end)
+- `gg` (file start), `G` (file end)
+- Works with operators: `dw`, `d$`, `cw`, `cb`
+- Works with counts: `3w`, `5b`, `2dw`
+- Works in visual mode to extend selection
+
+### Text Objects
+- `diw`, `ciw` — inner/change word
+- `di"`, `ci"`, `da"` — inner/around quotes (", ', `)
+- `di(`, `da{`, `ci[`, `da<` — inner/around brackets
+- Full operator + i/a + object input state machine
+
+### System Clipboard
+- `arboard` crate for cross-platform clipboard
+- Yank/delete/dd automatically copy to system clipboard
+- Paste reads from system clipboard first
+- `Cmd+C` (copy), `Cmd+V` (paste) in GUI
+
+### GUI Tab Shortcuts
+- `Cmd+1` through `Cmd+9` jump directly to tabs
+
+### Configurable Settings
+- `scroll_lines` (default 10) and `mouse_scroll_lines` (default 3) in config
+- `gui.font_family` and `gui.font_size` configurable via TOML
+- Extended `ThemeConfig` with 25+ color fields (foreground, background, cursor, selection, search, diagnostics, git signs, tabs, popups)
+- `GuiTheme` struct ready for progressive color migration
+
+### Git Gutter Signs
+- `git2` crate integration
+- `diff_signs()` computes +/~/- per line from HEAD
+- Buffer tracks `git_signs: HashMap<usize, GitSign>`
+- `PaneDisplay::git_sign(line)` trait method for renderers
+
+### URL Detection
+- `find_urls()`, `url_at_position()`, `open_url()` in `novim-core/src/url.rs`
+- Cross-platform open (macOS: `open`, Linux: `xdg-open`, Windows: `cmd`)
+
+### Auto-Reload
+- Buffer tracks `last_modified: Option<SystemTime>`
+- `EditorState::check_external_changes()` polls open files
+- Clean buffers auto-reload; dirty buffers skip
+- `Buffer::reload_from_file()` re-reads from disk
+
+### Debug Logging
+- `--debug` flag writes to `~/.novim/debug.log`
+- GUI writes to `~/.novim/gui-debug.log`
+- Filters wgpu/naga/winit noise
+
+---
+
+## v1.0.0 — Plugin Architecture & Multi-Platform Release
+
+### Phase 1: Plugin Foundation (Pure Rust)
+
+Create `crates/novim-core/src/plugin/` module:
+
+```
+plugin/
+├── mod.rs        # Plugin trait, PluginError, re-exports
+├── events.rs     # EditorEvent enum (BufOpen, BufWrite, TextChanged, ModeChanged, etc.)
+├── registry.rs   # CommandRegistry (string name → handler)
+├── context.rs    # PluginContext (restricted API for plugins)
+└── manager.rs    # PluginManager (lifecycle, event bus, dispatch)
+```
+
+**Plugin trait:**
+```rust
+pub trait Plugin: Send {
+    fn id(&self) -> &str;
+    fn name(&self) -> &str;
+    fn init(&mut self, ctx: &mut PluginContext);
+    fn shutdown(&mut self) {}
+    fn on_event(&mut self, event: &EditorEvent, ctx: &PluginContext) -> Vec<String>;
+    fn is_builtin(&self) -> bool { false }
+}
+```
+
+- Add `PluginManager` to `EditorState`
+- Emit events after mutations in `execute()`
+- Route unknown `:` commands through command registry
+- Add `plugins: HashMap<String, toml::Value>` to config
+
+### Phase 2: Lua Runtime (mlua)
+
+- Add `mlua` crate (Lua 5.4, vendored, Send)
+- `LuaPlugin` struct implementing `Plugin` trait
+- `novim` Lua API table:
+  - `novim.register_command()`, `novim.exec()`, `novim.on()`, `novim.keymap()`
+  - `novim.buf.*` (read/write), `novim.ui.*` (status, gutter signs)
+  - `novim.is_gui()` / `novim.is_tui()` for frontend detection
+- Load `~/.config/novim/init.lua` + `~/.config/novim/plugins/*.lua`
+- Unified `GutterSigns` with namespaces (replaces direct git/diagnostic rendering)
+- Error isolation: Lua errors logged, never crash
+
+### Phase 3: Built-in Feature Migration
+
+Wrap existing Rust modules as `Plugin` impls (same trait as user plugins):
+
+```
+plugin/builtins/
+├── mod.rs          # register_builtins(manager, config)
+├── git_signs.rs    # Wraps git::diff_signs() — subscribes to BufOpen, BufWrite
+├── lsp.rs          # Wraps lsp/ — subscribes to BufOpen, TextChanged
+├── syntax.rs       # Wraps highlight.rs — subscribes to BufOpen, TextChanged
+├── explorer.rs     # Wraps explorer.rs — registers :explore command
+└── finder.rs       # Wraps finder.rs — registers Ctrl+P keybinding
+```
+
+- Built-in plugins can be disabled: `[plugins.git_signs] enabled = false`
+- Migration is incremental — both plugin and hardcoded paths coexist
+- No existing behavior breaks during migration
+
+### Phase 4: User Plugin Ecosystem
+
+- Plugin discovery from `~/.config/novim/plugins/*.lua`
+- `:PluginList` command showing all plugins + status
+- Error auto-disable after N consecutive failures
+- Optional `.toml` manifest (name, version, dependencies)
+- Example plugins: auto_save, zen_mode, format_on_save
+
+### Multi-Platform Release
+
+Ship three targets from the same `novim-core` engine:
+
+```
+              novim-core (engine + plugin system)
+                       │
+        ┌──────────────┼──────────────┐
+        │              │              │
+  novim-cli       novim-gui      novim-neon
+  (terminal)      (desktop)      (Node.js)
+    Ratatui       wgpu/winit      Neon FFI
+```
+
+---
+
 ## v2.0.0+ — Long-term Vision
 
 - Collaborative editing (CRDT-based)
 - Remote development (SSH + local GUI)
 - Web version (WASM + WebGPU)
 - AI code completion integration
-- Plugin system (TypeScript-based, leveraging Neon FFI)
-- Vim emulation layer for full Vim compatibility
-- Git integration (inline blame, diff view)
+- Plugin marketplace / package manager
+- Full Vim compatibility layer
+- Inline git blame, diff view
 - Minimap / code overview
 - Breadcrumbs / symbol outline
+- DAP (Debug Adapter Protocol) integration

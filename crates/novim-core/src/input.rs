@@ -236,6 +236,10 @@ pub enum EditorCommand {
     DeleteTextObject(TextObjectModifier, TextObjectKind),
     /// Change a text object (e.g., ciw, ci", ca()
     ChangeTextObject(TextObjectModifier, TextObjectKind),
+    /// Display a message in the status bar.
+    Echo(String),
+    /// A plugin-registered command (name, args).
+    PluginCommand(String, String),
     Noop,
 }
 
@@ -723,6 +727,7 @@ pub fn parse_ex_command(input: &str) -> EditorCommand {
         "undo" => EditorCommand::Undo,
         "redo" => EditorCommand::Redo,
         "help" | "h" => EditorCommand::ToggleHelp,
+        "echo" => EditorCommand::Echo(args.to_string()),
         "set" => {
             if args.is_empty() {
                 EditorCommand::Noop
@@ -741,7 +746,8 @@ pub fn parse_ex_command(input: &str) -> EditorCommand {
                     return EditorCommand::ReplaceAll(pattern, replacement);
                 }
             }
-            EditorCommand::Noop
+            // Fall through to plugin registry for unknown commands
+            EditorCommand::PluginCommand(cmd.to_string(), args.to_string())
         }
     }
 }

@@ -21,6 +21,7 @@ use crate::input::{key_to_command, parse_ex_command, CountState, EditorCommand, 
 use crate::lsp::{self, LspClient, LspEvent};
 use crate::lsp::provider::LspRegistry;
 use crate::pane::{PaneContent, PaneManager, SplitDirection};
+use crate::plugin::manager::PluginManager;
 use crate::session;
 use novim_types::{EditorMode, Selection};
 
@@ -357,6 +358,8 @@ pub struct EditorState {
     pub workspace_list_selected: usize,
     /// Show the welcome/splash screen (dismissed on first keypress).
     pub show_welcome: bool,
+    /// Plugin system manager.
+    pub plugins: PluginManager,
 }
 
 fn ln_mode_from_config(s: &str) -> LineNumberMode {
@@ -408,6 +411,8 @@ impl EditorState {
 
     fn with_config_and_tabs(cfg: NovimConfig, registry: Arc<LspRegistry>, tabs: Vec<Workspace>, active_tab: usize, status_message: Option<String>) -> Self {
         let ln_mode = ln_mode_from_config(&cfg.editor.line_numbers);
+        let mut plugins = PluginManager::new(false, std::collections::HashMap::new());
+        plugins.load_lua_plugins();
         Self {
             tabs,
             active_tab,
@@ -430,6 +435,7 @@ impl EditorState {
             show_workspace_list: false,
             workspace_list_selected: 0,
             show_welcome: false,
+            plugins,
         }
     }
 
@@ -524,6 +530,79 @@ impl EditorState {
     /// Execute a command. Returns Ok(Quit) to exit, Ok(Continue) to keep going,
     /// or Err with structured error information.
     pub fn execute(
+        &mut self,
+        cmd: EditorCommand,
+        screen_area: novim_types::Rect,
+    ) -> Result<ExecOutcome, NovimError> {
+        let old_mode = self.mode;
+        let events = Self::events_for_command(&cmd, self);
+        let result = self.execute_inner(cmd, screen_area);
+        if result.is_ok() {
+            // Emit mode change if it changed
+            if self.mode != old_mode {
+                let mode_cmds = self.plugins.dispatch(&crate::plugin::EditorEvent::ModeChanged {
+                    from: old_mode.display_name().to_string(),
+                    to: self.mode.display_name().to_string(),
+                });
+                for cmd_str in mode_cmds {
+                    let parsed = parse_ex_command(&cmd_str);
+                    let _ = self.execute(parsed, screen_area);
+                }
+            }
+            // Emit command-specific events and execute any commands plugins return
+            for event in events {
+                let plugin_cmds = self.plugins.dispatch(&event);
+                for cmd_str in plugin_cmds {
+                    let parsed = parse_ex_command(&cmd_str);
+                    let _ = self.execute(parsed, screen_area);
+                }
+            }
+        }
+        result
+    }
+
+    /// Map a command to the editor events it should emit (called before execution
+    /// so we can capture pre-state like file paths).
+    fn events_for_command(cmd: &EditorCommand, state: &EditorState) -> Vec<crate::plugin::EditorEvent> {
+        use crate::plugin::EditorEvent;
+        let path = || -> String {
+            state.focused_buf().display_name()
+        };
+        match cmd {
+            EditorCommand::Save | EditorCommand::SaveAndQuit => {
+                vec![EditorEvent::BufWrite { path: path() }]
+            }
+            EditorCommand::EditFile(p) => {
+                vec![EditorEvent::BufOpen { path: p.clone() }]
+            }
+            EditorCommand::InsertChar(_)
+            | EditorCommand::InsertTab
+            | EditorCommand::InsertNewline
+            | EditorCommand::DeleteCharBefore
+            | EditorCommand::Paste
+            | EditorCommand::DeleteLines(_)
+            | EditorCommand::DeleteMotion(..)
+            | EditorCommand::ChangeMotion(..)
+            | EditorCommand::ChangeLines(_)
+            | EditorCommand::ReplaceAll(..)
+            | EditorCommand::Undo
+            | EditorCommand::Redo
+            | EditorCommand::DeleteSelection
+            | EditorCommand::DeleteTextObject(..)
+            | EditorCommand::ChangeTextObject(..)
+            | EditorCommand::CompletionAccept => {
+                vec![EditorEvent::TextChanged { path: path() }]
+            }
+            EditorCommand::CommandExecute => {
+                vec![EditorEvent::CommandExecuted {
+                    command: state.command_buffer.clone(),
+                }]
+            }
+            _ => vec![],
+        }
+    }
+
+    fn execute_inner(
         &mut self,
         cmd: EditorCommand,
         screen_area: novim_types::Rect,
@@ -1177,6 +1256,26 @@ impl EditorState {
                     }
                 }
                 Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::Echo(msg) => {
+                self.status_message = Some(msg);
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::PluginCommand(name, args) => {
+                if self.plugins.has_command(&name) {
+                    let event = crate::plugin::EditorEvent::CommandExecuted {
+                        command: if args.is_empty() { name.clone() } else { format!("{} {}", name, args) },
+                    };
+                    let commands = self.plugins.dispatch(&event);
+                    for cmd_str in commands {
+                        let parsed = parse_ex_command(&cmd_str);
+                        self.execute(parsed, screen_area)?;
+                    }
+                    Ok(ExecOutcome::Continue)
+                } else {
+                    self.status_message = Some(format!("Unknown command: {}", name));
+                    Ok(ExecOutcome::Continue)
+                }
             }
             EditorCommand::Noop => Ok(ExecOutcome::Continue),
         }
