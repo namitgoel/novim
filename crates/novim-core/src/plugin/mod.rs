@@ -46,6 +46,15 @@ pub struct BufferSnapshot {
     pub is_dirty: bool,
     pub mode: String,
     pub selection: Option<(usize, usize, usize, usize)>,
+    pub selected_text: Option<String>,
+    // Editor options
+    pub tab_width: usize,
+    pub expand_tab: bool,
+    pub auto_indent: bool,
+    pub word_wrap: bool,
+    pub line_numbers: String,
+    // Pane info
+    pub pane_count: usize,
 }
 
 // ── PluginAction: structured mutations plugins can request ──
@@ -65,6 +74,10 @@ pub enum PluginAction {
     SetStatus(String),
     /// Register a keybinding at runtime.
     RegisterKeymap { mode: String, key: String, action: KeymapAction },
+    /// Set visual selection.
+    SetSelection { start_line: usize, start_col: usize, end_line: usize, end_col: usize },
+    /// Clear visual selection.
+    ClearSelection,
 }
 
 /// What happens when a plugin-registered key is pressed.

@@ -72,8 +72,37 @@ impl LuaPlugin {
         novim.set("_commands", commands)
             .map_err(|e| format!("Failed to set _commands: {}", e))?;
 
-        // novim.on(event, fn) — subscribe to an event
-        let on_fn = self.lua.create_function(|lua, (event, handler): (String, Function)| {
+        // novim.on(event, [opts], fn) — subscribe to an event
+        // opts is optional: { pattern = "*.rs" } to filter by file path glob
+        let on_fn = self.lua.create_function(|lua, args: mlua::MultiValue| {
+            let mut args_vec: Vec<Value> = args.into_iter().collect();
+            if args_vec.len() < 2 {
+                return Err(mlua::Error::runtime("novim.on requires at least 2 arguments: event, handler"));
+            }
+            let event = match args_vec.remove(0) {
+                Value::String(s) => s.to_str()?.to_string(),
+                _ => return Err(mlua::Error::runtime("first argument must be event name string")),
+            };
+            // If 3 args: (event, opts, handler). If 2: (event, handler)
+            let (pattern, handler) = if args_vec.len() >= 2 {
+                let opts = match args_vec.remove(0) {
+                    Value::Table(t) => t,
+                    _ => return Err(mlua::Error::runtime("second argument must be opts table or handler function")),
+                };
+                let pattern: Option<String> = opts.get("pattern").ok();
+                let handler = match args_vec.remove(0) {
+                    Value::Function(f) => f,
+                    _ => return Err(mlua::Error::runtime("last argument must be handler function")),
+                };
+                (pattern, handler)
+            } else {
+                let handler = match args_vec.remove(0) {
+                    Value::Function(f) => f,
+                    _ => return Err(mlua::Error::runtime("last argument must be handler function")),
+                };
+                (None, handler)
+            };
+
             let novim: mlua::Table = lua.globals().get("novim")?;
             let handlers: mlua::Table = novim.get("_handlers")?;
             let list: mlua::Table = match handlers.get::<Value>(event.as_str())? {
@@ -85,7 +114,13 @@ impl LuaPlugin {
                 }
             };
             let len = list.len()?;
-            list.set(len + 1, handler)?;
+            // Store as {fn=handler, pattern=pattern_or_nil}
+            let entry = lua.create_table()?;
+            entry.set("fn", handler)?;
+            if let Some(p) = pattern {
+                entry.set("pattern", p)?;
+            }
+            list.set(len + 1, entry)?;
             Ok(())
         }).map_err(|e| format!("Failed to create novim.on: {}", e))?;
         novim.set("on", on_fn)
@@ -338,6 +373,174 @@ impl LuaPlugin {
         novim.set("ui", ui)
             .map_err(|e| format!("Failed to set novim.ui: {}", e))?;
 
+        // ── novim.opt — editor options read/write ──
+        let opt = self.lua.create_table()
+            .map_err(|e| format!("Failed to create opt table: {}", e))?;
+
+        // novim.opt.get(name) — read an editor option
+        opt.set("get", self.lua.create_function(|lua, name: String| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let snap: mlua::Table = novim.get("_snapshot")?;
+            match name.as_str() {
+                "tab_width" | "tabstop" | "ts" => Ok(Value::Integer(snap.get::<i64>("tab_width")?)),
+                "expand_tab" | "et" => Ok(Value::Boolean(snap.get::<bool>("expand_tab")?)),
+                "auto_indent" | "ai" => Ok(Value::Boolean(snap.get::<bool>("auto_indent")?)),
+                "word_wrap" | "wrap" => Ok(Value::Boolean(snap.get::<bool>("word_wrap")?)),
+                "line_numbers" => Ok(Value::String(lua.create_string(snap.get::<String>("line_numbers")?)?)),
+                "pane_count" => Ok(Value::Integer(snap.get::<i64>("pane_count")?)),
+                _ => Ok(Value::Nil),
+            }
+        }).map_err(|e| format!("opt.get: {}", e))?)
+            .map_err(|e| format!("set opt.get: {}", e))?;
+
+        // novim.opt.set(name, value) — write an editor option via :set
+        opt.set("set", self.lua.create_function(|lua, (name, value): (String, Value)| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let queue: mlua::Table = match novim.get::<Value>("_cmd_queue")? {
+                Value::Table(t) => t,
+                _ => {
+                    let t = lua.create_table()?;
+                    novim.set("_cmd_queue", t.clone())?;
+                    t
+                }
+            };
+            let len = queue.len()?;
+            let cmd = match name.as_str() {
+                "tab_width" | "tabstop" | "ts" => {
+                    if let Value::Integer(n) = value { format!("set ts={}", n) }
+                    else { return Err(mlua::Error::runtime("tab_width must be integer")) }
+                }
+                "expand_tab" | "et" => {
+                    if let Value::Boolean(v) = value { if v { "set et".into() } else { "set noet".into() } }
+                    else { return Err(mlua::Error::runtime("expand_tab must be boolean")) }
+                }
+                "auto_indent" | "ai" => {
+                    if let Value::Boolean(v) = value { if v { "set ai".into() } else { "set noai".into() } }
+                    else { return Err(mlua::Error::runtime("auto_indent must be boolean")) }
+                }
+                "word_wrap" | "wrap" => {
+                    if let Value::Boolean(v) = value { if v { "set wrap".into() } else { "set nowrap".into() } }
+                    else { return Err(mlua::Error::runtime("word_wrap must be boolean")) }
+                }
+                "line_numbers" => {
+                    if let Value::String(s) = value {
+                        let s = s.to_str()?.to_string();
+                        match s.as_str() {
+                            "absolute" | "nu" => "set nu".into(),
+                            "relative" | "rnu" => "set rnu".into(),
+                            "off" | "nonu" => "set nonu".into(),
+                            _ => return Err(mlua::Error::runtime(format!("Unknown line_numbers mode: {}", s))),
+                        }
+                    } else { return Err(mlua::Error::runtime("line_numbers must be string")) }
+                }
+                _ => return Err(mlua::Error::runtime(format!("Unknown option: {}", name))),
+            };
+            queue.set(len + 1, cmd)?;
+            Ok(())
+        }).map_err(|e| format!("opt.set: {}", e))?)
+            .map_err(|e| format!("set opt.set: {}", e))?;
+
+        novim.set("opt", opt)
+            .map_err(|e| format!("Failed to set novim.opt: {}", e))?;
+
+        // ── novim.win — window/pane API ──
+        let win = self.lua.create_table()
+            .map_err(|e| format!("Failed to create win table: {}", e))?;
+
+        win.set("split", self.lua.create_function(|lua, dir: String| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let queue: mlua::Table = match novim.get::<Value>("_cmd_queue")? {
+                Value::Table(t) => t,
+                _ => { let t = lua.create_table()?; novim.set("_cmd_queue", t.clone())?; t }
+            };
+            let len = queue.len()?;
+            let cmd = match dir.as_str() {
+                "vertical" | "v" => "vsplit",
+                "horizontal" | "h" => "split",
+                _ => return Err(mlua::Error::runtime(format!("Unknown split direction: {}", dir))),
+            };
+            queue.set(len + 1, cmd)?;
+            Ok(())
+        }).map_err(|e| format!("win.split: {}", e))?)
+            .map_err(|e| format!("set win.split: {}", e))?;
+
+        win.set("close", self.lua.create_function(|lua, ()| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let queue: mlua::Table = match novim.get::<Value>("_cmd_queue")? {
+                Value::Table(t) => t,
+                _ => { let t = lua.create_table()?; novim.set("_cmd_queue", t.clone())?; t }
+            };
+            let len = queue.len()?;
+            queue.set(len + 1, "close")?;
+            Ok(())
+        }).map_err(|e| format!("win.close: {}", e))?)
+            .map_err(|e| format!("set win.close: {}", e))?;
+
+        win.set("count", self.lua.create_function(|lua, ()| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let snap: mlua::Table = novim.get("_snapshot")?;
+            Ok(snap.get::<usize>("pane_count")?)
+        }).map_err(|e| format!("win.count: {}", e))?)
+            .map_err(|e| format!("set win.count: {}", e))?;
+
+        novim.set("win", win)
+            .map_err(|e| format!("Failed to set novim.win: {}", e))?;
+
+        // ── Selection API additions to novim.buf ──
+        let buf_table: mlua::Table = novim.get("buf")
+            .map_err(|e| format!("Failed to get buf table: {}", e))?;
+
+        buf_table.set("get_selection", self.lua.create_function(|lua, ()| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let snap: mlua::Table = novim.get("_snapshot")?;
+            match snap.get::<Value>("selection")? {
+                Value::Table(sel) => {
+                    let result = lua.create_table()?;
+                    result.set("start_line", sel.get::<usize>("start_line")?)?;
+                    result.set("start_col", sel.get::<usize>("start_col")?)?;
+                    result.set("end_line", sel.get::<usize>("end_line")?)?;
+                    result.set("end_col", sel.get::<usize>("end_col")?)?;
+                    Ok(Value::Table(result))
+                }
+                _ => Ok(Value::Nil),
+            }
+        }).map_err(|e| format!("buf.get_selection: {}", e))?)
+            .map_err(|e| format!("set buf.get_selection: {}", e))?;
+
+        buf_table.set("selected_text", self.lua.create_function(|lua, ()| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let snap: mlua::Table = novim.get("_snapshot")?;
+            match snap.get::<Value>("selected_text")? {
+                Value::String(s) => Ok(Value::String(s)),
+                _ => Ok(Value::Nil),
+            }
+        }).map_err(|e| format!("buf.selected_text: {}", e))?)
+            .map_err(|e| format!("set buf.selected_text: {}", e))?;
+
+        buf_table.set("set_selection", self.lua.create_function(|lua, (sl, sc, el, ec): (usize, usize, usize, usize)| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let push: Function = novim.get("_push_action")?;
+            let action = lua.create_table()?;
+            action.set("type", "set_selection")?;
+            action.set("start_line", sl)?;
+            action.set("start_col", sc)?;
+            action.set("end_line", el)?;
+            action.set("end_col", ec)?;
+            push.call::<()>(action)?;
+            Ok(())
+        }).map_err(|e| format!("buf.set_selection: {}", e))?)
+            .map_err(|e| format!("set buf.set_selection: {}", e))?;
+
+        buf_table.set("clear_selection", self.lua.create_function(|lua, ()| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let push: Function = novim.get("_push_action")?;
+            let action = lua.create_table()?;
+            action.set("type", "clear_selection")?;
+            push.call::<()>(action)?;
+            Ok(())
+        }).map_err(|e| format!("buf.clear_selection: {}", e))?)
+            .map_err(|e| format!("set buf.clear_selection: {}", e))?;
+
         // ── novim.keymap(mode, key, action) — register a keybinding ──
         // action can be a string (ex-command) or a function (Lua callback)
         let keymap_callbacks = self.lua.create_table()
@@ -450,6 +653,16 @@ impl LuaPlugin {
                 let msg: String = tbl.get("msg").ok()?;
                 Some(PluginAction::SetStatus(msg))
             }
+            "set_selection" => {
+                let start_line: usize = tbl.get("start_line").ok()?;
+                let start_col: usize = tbl.get("start_col").ok()?;
+                let end_line: usize = tbl.get("end_line").ok()?;
+                let end_col: usize = tbl.get("end_col").ok()?;
+                Some(PluginAction::SetSelection { start_line, start_col, end_line, end_col })
+            }
+            "clear_selection" => {
+                Some(PluginAction::ClearSelection)
+            }
             "register_keymap" => {
                 let mode: String = tbl.get("mode").ok()?;
                 let key: String = tbl.get("key").ok()?;
@@ -501,6 +714,16 @@ impl LuaPlugin {
             let _ = sel.set("end_col", ec);
             let _ = snap.set("selection", sel);
         }
+        if let Some(text) = &ctx.buf.selected_text {
+            let _ = snap.set("selected_text", text.as_str());
+        }
+        // Options
+        let _ = snap.set("tab_width", ctx.buf.tab_width);
+        let _ = snap.set("expand_tab", ctx.buf.expand_tab);
+        let _ = snap.set("auto_indent", ctx.buf.auto_indent);
+        let _ = snap.set("word_wrap", ctx.buf.word_wrap);
+        let _ = snap.set("line_numbers", ctx.buf.line_numbers.as_str());
+        let _ = snap.set("pane_count", ctx.buf.pane_count);
 
         let _ = novim.set("_snapshot", snap);
     }
@@ -519,11 +742,38 @@ impl LuaPlugin {
             let _ = args_table.set(k.as_str(), v.as_str());
         }
 
-        for pair in list.pairs::<i64, Function>() {
-            if let Ok((_, handler)) = pair {
-                if let Err(e) = handler.call::<()>(args_table.clone()) {
-                    log::warn!("Lua handler error in {} for {}: {}", self.id, event_name, e);
+        // Get the current file path for pattern matching
+        let current_path = args.get("path").cloned()
+            .or_else(|| ctx.buf.path.clone())
+            .unwrap_or_default();
+
+        for pair in list.pairs::<i64, Value>() {
+            let Ok((_, entry)) = pair else { continue };
+            match entry {
+                // New format: { fn=handler, pattern="*.rs" }
+                Value::Table(tbl) => {
+                    // Check pattern filter
+                    if let Ok(pattern) = tbl.get::<String>("pattern") {
+                        let pat = glob::Pattern::new(&pattern).ok();
+                        if let Some(pat) = pat {
+                            if !pat.matches(&current_path) {
+                                continue; // Skip — pattern doesn't match
+                            }
+                        }
+                    }
+                    if let Ok(handler) = tbl.get::<Function>("fn") {
+                        if let Err(e) = handler.call::<()>(args_table.clone()) {
+                            log::warn!("Lua handler error in {} for {}: {}", self.id, event_name, e);
+                        }
+                    }
                 }
+                // Legacy format: bare function (shouldn't happen with new on(), but be safe)
+                Value::Function(handler) => {
+                    if let Err(e) = handler.call::<()>(args_table.clone()) {
+                        log::warn!("Lua handler error in {} for {}: {}", self.id, event_name, e);
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -722,6 +972,104 @@ mod tests {
         assert_eq!(plugin.name(), "auto save");
     }
 
+    #[test]
+    fn lua_opt_get() {
+        let mut plugin = lua_plugin_from_source("test_opt", r#"
+            novim.on("BufOpen", function(args)
+                local tw = novim.opt.get("tab_width")
+                local wrap = novim.opt.get("word_wrap")
+                novim.exec("echo tw=" .. tw .. " wrap=" .. tostring(wrap))
+            end)
+        "#);
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        let ctx = ctx_with_snapshot();
+        let actions = plugin.on_event(&EditorEvent::BufOpen { path: "test.rs".into() }, &ctx);
+        assert_exec_commands(&actions, &["echo tw=4 wrap=false"]);
+    }
+
+    #[test]
+    fn lua_opt_set() {
+        let mut plugin = lua_plugin_from_source("test_opt_set", r#"
+            novim.on("BufOpen", function(args)
+                novim.opt.set("word_wrap", true)
+                novim.opt.set("tab_width", 2)
+            end)
+        "#);
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        let ctx = ctx_with_snapshot();
+        let actions = plugin.on_event(&EditorEvent::BufOpen { path: "test.rs".into() }, &ctx);
+        assert_exec_commands(&actions, &["set wrap", "set ts=2"]);
+    }
+
+    #[test]
+    fn lua_win_api() {
+        let mut plugin = lua_plugin_from_source("test_win", r#"
+            novim.on("BufOpen", function(args)
+                local n = novim.win.count()
+                novim.exec("echo panes=" .. n)
+                novim.win.split("vertical")
+            end)
+        "#);
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        let ctx = ctx_with_snapshot();
+        let actions = plugin.on_event(&EditorEvent::BufOpen { path: "test.rs".into() }, &ctx);
+        // Should have echo + vsplit
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(&actions[0], PluginAction::ExecCommand(s) if s == "echo panes=1"));
+        assert!(matches!(&actions[1], PluginAction::ExecCommand(s) if s == "vsplit"));
+    }
+
+    #[test]
+    fn lua_autocmd_filter() {
+        let mut plugin = lua_plugin_from_source("test_filter", r#"
+            novim.on("BufWrite", { pattern = "*.rs" }, function(args)
+                novim.exec("echo rust file saved")
+            end)
+            novim.on("BufWrite", { pattern = "*.lua" }, function(args)
+                novim.exec("echo lua file saved")
+            end)
+        "#);
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        // .rs file should trigger first handler only
+        let ctx = ctx_with_snapshot();
+        let actions = plugin.on_event(&EditorEvent::BufWrite { path: "main.rs".into() }, &ctx);
+        assert_exec_commands(&actions, &["echo rust file saved"]);
+
+        // .lua file should trigger second handler only
+        let actions = plugin.on_event(&EditorEvent::BufWrite { path: "init.lua".into() }, &ctx);
+        assert_exec_commands(&actions, &["echo lua file saved"]);
+
+        // .py file should trigger neither
+        let actions = plugin.on_event(&EditorEvent::BufWrite { path: "test.py".into() }, &ctx);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn lua_selection_api() {
+        let mut plugin = lua_plugin_from_source("test_sel", r#"
+            novim.on("BufOpen", function(args)
+                novim.buf.set_selection(0, 0, 1, 5)
+            end)
+        "#);
+        let mut init_ctx = PluginContext::new(false);
+        plugin.init(&mut init_ctx);
+
+        let ctx = ctx_with_snapshot();
+        let actions = plugin.on_event(&EditorEvent::BufOpen { path: "test.rs".into() }, &ctx);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(&actions[0], PluginAction::SetSelection {
+            start_line: 0, start_col: 0, end_line: 1, end_col: 5
+        }));
+    }
+
     fn ctx_with_snapshot() -> PluginContext {
         let mut ctx = PluginContext::new(false);
         ctx.buf = super::super::BufferSnapshot {
@@ -733,6 +1081,13 @@ mod tests {
             is_dirty: false,
             mode: "NORMAL".into(),
             selection: None,
+            selected_text: None,
+            tab_width: 4,
+            expand_tab: true,
+            auto_indent: true,
+            word_wrap: false,
+            line_numbers: "hybrid".into(),
+            pane_count: 1,
         };
         ctx
     }

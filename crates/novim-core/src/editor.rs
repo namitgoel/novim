@@ -580,6 +580,13 @@ impl EditorState {
             is_dirty: buf.is_dirty(),
             mode: self.mode.display_name().to_string(),
             selection: sel,
+            selected_text: buf.selected_text(),
+            tab_width: self.config.editor.tab_width,
+            expand_tab: self.config.editor.expand_tab,
+            auto_indent: self.config.editor.auto_indent,
+            word_wrap: self.config.editor.word_wrap,
+            line_numbers: self.config.editor.line_numbers.clone(),
+            pane_count: self.tabs[self.active_tab].panes.pane_count(),
         }
     }
 
@@ -627,6 +634,18 @@ impl EditorState {
                 }
                 PluginAction::RegisterKeymap { mode, key, action } => {
                     self.plugins.keymaps.register(&mode, &key, "lua", action);
+                }
+                PluginAction::SetSelection { start_line, start_col, end_line, end_col } => {
+                    let anchor = novim_types::Position::new(start_line, start_col);
+                    let head = novim_types::Position::new(end_line, end_col);
+                    self.focused_buf_mut().set_selection(Some(Selection::new(anchor, head)));
+                    self.mode = EditorMode::Visual;
+                }
+                PluginAction::ClearSelection => {
+                    self.focused_buf_mut().set_selection(None);
+                    if self.mode == EditorMode::Visual {
+                        self.mode = EditorMode::Normal;
+                    }
                 }
             }
         }
