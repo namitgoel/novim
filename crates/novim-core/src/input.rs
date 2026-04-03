@@ -238,6 +238,8 @@ pub enum EditorCommand {
     ChangeTextObject(TextObjectModifier, TextObjectKind),
     /// Display a message in the status bar.
     Echo(String),
+    /// List all loaded plugins.
+    PluginList,
     /// A plugin-registered command (name, args).
     PluginCommand(String, String),
     Noop,
@@ -728,6 +730,7 @@ pub fn parse_ex_command(input: &str) -> EditorCommand {
         "redo" => EditorCommand::Redo,
         "help" | "h" => EditorCommand::ToggleHelp,
         "echo" => EditorCommand::Echo(args.to_string()),
+        "PluginList" | "pluginlist" | "plugins" => EditorCommand::PluginList,
         "set" => {
             if args.is_empty() {
                 EditorCommand::Noop

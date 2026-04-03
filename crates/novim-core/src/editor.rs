@@ -1389,6 +1389,20 @@ impl EditorState {
                 self.status_message = Some(msg);
                 Ok(ExecOutcome::Continue)
             }
+            EditorCommand::PluginList => {
+                let list = self.plugins.list();
+                if list.is_empty() {
+                    self.status_message = Some("No plugins loaded".to_string());
+                } else {
+                    let items: Vec<String> = list.iter().map(|(id, name, enabled, builtin)| {
+                        let status = if *enabled { "+" } else { "-" };
+                        let kind = if *builtin { "builtin" } else { "user" };
+                        format!("[{}] {} ({}, {})", status, id, name, kind)
+                    }).collect();
+                    self.status_message = Some(items.join(" | "));
+                }
+                Ok(ExecOutcome::Continue)
+            }
             EditorCommand::PluginCommand(name, args) => {
                 if self.plugins.has_command(&name) {
                     let snapshot = self.make_buffer_snapshot();

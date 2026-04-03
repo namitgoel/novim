@@ -1,6 +1,7 @@
 //! Built-in plugins — Rust implementations that own real logic.
 
 pub mod git_signs;
+pub mod syntax;
 
 use super::manager::PluginManager;
 

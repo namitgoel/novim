@@ -13,7 +13,8 @@ pub mod editor;
 pub mod emulator;
 pub mod explorer;
 pub mod finder;
-pub mod highlight;
+/// Re-export syntax highlighting types from the plugin module.
+pub use plugin::builtins::syntax as highlight;
 pub mod lsp;
 pub mod error;
 pub mod fold;
