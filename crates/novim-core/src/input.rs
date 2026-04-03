@@ -490,6 +490,17 @@ pub fn key_to_command(
         };
     }
 
+    // Safety: if we reach here with any non-Ready/non-AccumulatingCount state,
+    // it means an InputState variant was not handled above. Reset to Ready with
+    // Noop to avoid silently misinterpreting keys in a stale waiting state.
+    if input_state != InputState::Ready && input_state != InputState::AccumulatingCount {
+        log::warn!(
+            "key_to_command: unhandled InputState {:?} fell through to mode dispatch, resetting",
+            input_state
+        );
+        return (EditorCommand::Noop, InputState::Ready);
+    }
+
     match mode {
         EditorMode::Normal => normal_mode_command(key),
         EditorMode::Insert => (insert_mode_command(key), InputState::Ready),

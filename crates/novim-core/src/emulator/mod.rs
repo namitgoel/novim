@@ -87,7 +87,11 @@ impl TerminalPane {
             let mut buf = [0u8; 65536]; // 64 KB — large reads reduce syscall overhead
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break, // EOF or error, shell exited
+                    Ok(0) => break, // EOF, shell exited
+                    Err(e) => {
+                        log::warn!("PTY read error: {}", e);
+                        break;
+                    }
                     Ok(n) => {
                         if tx.send(buf[..n].to_vec()).is_err() {
                             break; // Receiver dropped

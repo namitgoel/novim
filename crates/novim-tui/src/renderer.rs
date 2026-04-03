@@ -241,6 +241,105 @@ fn render_panes(f: &mut ratatui::Frame, area: Rect, state: &mut EditorState, bor
     }
 }
 
+/// Adjust viewport_offset so the cursor stays visible.
+fn adjust_viewport(
+    pane: &mut Pane,
+    available_height: usize,
+    text_width: usize,
+    tab_width: usize,
+    word_wrap: bool,
+) {
+    let content = pane.content.as_buffer_like();
+    let cursor = content.cursor();
+
+    if word_wrap && text_width > 0 {
+        let mut rows_before_cursor = 0usize;
+        for line in pane.viewport_offset..cursor.line {
+            let raw = content.get_line(line).unwrap_or_default();
+            let expanded = expand_tabs(&raw, tab_width);
+            rows_before_cursor += wrapped_row_count(&expanded, text_width);
+        }
+        let cursor_raw = content.get_line(cursor.line).unwrap_or_default();
+        let cursor_display = display_col(&cursor_raw, cursor.column, tab_width);
+        let cursor_wrap_row = if text_width > 0 { cursor_display / text_width } else { 0 };
+        let total_rows_to_cursor = rows_before_cursor + cursor_wrap_row;
+
+        if cursor.line < pane.viewport_offset {
+            pane.viewport_offset = cursor.line;
+        } else if available_height > 0 && total_rows_to_cursor >= available_height {
+            let mut offset = pane.viewport_offset;
+            loop {
+                let raw = content.get_line(offset).unwrap_or_default();
+                let expanded = expand_tabs(&raw, tab_width);
+                let rows = wrapped_row_count(&expanded, text_width);
+                if rows_before_cursor < rows { break; }
+                rows_before_cursor -= rows;
+                offset += 1;
+                if offset >= cursor.line { break; }
+                let new_total = rows_before_cursor + cursor_wrap_row;
+                if new_total < available_height { break; }
+            }
+            pane.viewport_offset = offset;
+        }
+    } else {
+        if cursor.line < pane.viewport_offset {
+            pane.viewport_offset = cursor.line;
+        } else if available_height > 0 && cursor.line >= pane.viewport_offset + available_height {
+            pane.viewport_offset = cursor.line.saturating_sub(available_height - 1);
+        }
+    }
+}
+
+/// Position the terminal cursor within a pane.
+fn position_cursor(
+    f: &mut ratatui::Frame,
+    pane: &Pane,
+    area: Rect,
+    ln_mode: super::LineNumberMode,
+    tab_width: usize,
+    borderless: bool,
+    cursor_screen_row: Option<usize>,
+    cursor_screen_col: Option<usize>,
+    available_height: usize,
+) {
+    let content = pane.content.as_buffer_like();
+    let cursor = content.cursor();
+    let is_terminal = content.is_terminal();
+    let border_off: u16 = if borderless { 0 } else { 1 };
+    let col_offset: u16 = if is_terminal || ln_mode == super::LineNumberMode::Off {
+        border_off
+    } else {
+        border_off + 5
+    };
+
+    if let (Some(row), Some(col)) = (cursor_screen_row, cursor_screen_col) {
+        if row < available_height {
+            f.set_cursor_position((
+                area.x + col_offset + col as u16,
+                area.y + border_off + row as u16,
+            ));
+        }
+    } else {
+        let cursor_line_on_screen = if is_terminal {
+            cursor.line
+        } else {
+            cursor.line.saturating_sub(pane.viewport_offset)
+        };
+        if cursor_line_on_screen < available_height {
+            let visual_col = if is_terminal {
+                cursor.column
+            } else {
+                let raw = content.get_line(cursor.line).unwrap_or_default();
+                display_col(&raw, cursor.column, tab_width)
+            };
+            f.set_cursor_position((
+                area.x + col_offset + visual_col as u16,
+                area.y + border_off + cursor_line_on_screen as u16,
+            ));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_single_pane(
     f: &mut ratatui::Frame,
@@ -259,7 +358,6 @@ fn render_single_pane(
     let content = pane.content.as_buffer_like();
     let border_overhead: u16 = if borderless { 0 } else { 2 };
     let available_height = area.height.saturating_sub(border_overhead) as usize;
-    let cursor = content.cursor();
     let is_terminal = content.is_terminal();
     let selection = content.selection();
 
@@ -268,48 +366,11 @@ fn render_single_pane(
     let text_width = (area.width.saturating_sub(border_overhead) as usize).saturating_sub(gutter_width);
 
     if !is_terminal {
-        if word_wrap && text_width > 0 {
-            // With wrap, we need to count wrapped rows to keep cursor visible
-            let mut rows_before_cursor = 0usize;
-            for line in pane.viewport_offset..cursor.line {
-                let raw = content.get_line(line).unwrap_or_default();
-                let expanded = expand_tabs(&raw, tab_width);
-                rows_before_cursor += wrapped_row_count(&expanded, text_width);
-            }
-            // Cursor's wrapped row within its line
-            let cursor_raw = content.get_line(cursor.line).unwrap_or_default();
-            let cursor_display = display_col(&cursor_raw, cursor.column, tab_width);
-            let cursor_wrap_row = if text_width > 0 { cursor_display / text_width } else { 0 };
-            let total_rows_to_cursor = rows_before_cursor + cursor_wrap_row;
-
-            if cursor.line < pane.viewport_offset {
-                pane.viewport_offset = cursor.line;
-            } else if available_height > 0 && total_rows_to_cursor >= available_height {
-                // Scroll up until cursor fits
-                let mut offset = pane.viewport_offset;
-                loop {
-                    let raw = content.get_line(offset).unwrap_or_default();
-                    let expanded = expand_tabs(&raw, tab_width);
-                    let rows = wrapped_row_count(&expanded, text_width);
-                    if rows_before_cursor < rows { break; }
-                    rows_before_cursor -= rows;
-                    offset += 1;
-                    if offset >= cursor.line { break; }
-                    let new_total = rows_before_cursor + cursor_wrap_row;
-                    if new_total < available_height { break; }
-                }
-                pane.viewport_offset = offset;
-            }
-        } else {
-            if cursor.line < pane.viewport_offset {
-                pane.viewport_offset = cursor.line;
-            } else if available_height > 0 && cursor.line >= pane.viewport_offset + available_height {
-                pane.viewport_offset = cursor.line.saturating_sub(available_height - 1);
-            }
-        }
+        adjust_viewport(pane, available_height, text_width, tab_width, word_wrap);
     }
 
     let content = pane.content.as_buffer_like();
+    let cursor = content.cursor();
     let total_lines = content.len_lines().max(1);
     let mut lines = Vec::with_capacity(available_height);
     let offset = if is_terminal { 0 } else { pane.viewport_offset };
@@ -518,41 +579,7 @@ fn render_single_pane(
     }
 
     if is_focused && available_height > 0 {
-        let cursor = pane.content.as_buffer_like().cursor();
-        let border_off: u16 = if borderless { 0 } else { 1 };
-        let col_offset: u16 = if is_terminal || ln_mode == super::LineNumberMode::Off {
-            border_off
-        } else {
-            border_off + 5
-        };
-
-        // Use wrap-aware cursor position if available
-        if let (Some(row), Some(col)) = (cursor_screen_row, cursor_screen_col) {
-            if row < available_height {
-                f.set_cursor_position((
-                    area.x + col_offset + col as u16,
-                    area.y + border_off + row as u16,
-                ));
-            }
-        } else {
-            let cursor_line_on_screen = if is_terminal {
-                cursor.line
-            } else {
-                cursor.line.saturating_sub(pane.viewport_offset)
-            };
-            if cursor_line_on_screen < available_height {
-                let visual_col = if is_terminal {
-                    cursor.column
-                } else {
-                    let raw = content.get_line(cursor.line).unwrap_or_default();
-                    display_col(&raw, cursor.column, tab_width)
-                };
-                f.set_cursor_position((
-                    area.x + col_offset + visual_col as u16,
-                    area.y + border_off + cursor_line_on_screen as u16,
-                ));
-            }
-        }
+        position_cursor(f, pane, area, ln_mode, tab_width, borderless, cursor_screen_row, cursor_screen_col, available_height);
     }
 }
 

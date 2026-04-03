@@ -353,15 +353,7 @@ fn handle_key(
             KeyCode::Char('s') => Some(EditorCommand::Save),
             KeyCode::Char('q') => Some(EditorCommand::Quit),
             // Cmd+1-9: jump to tab
-            KeyCode::Char('1') => Some(EditorCommand::JumpToTab(0)),
-            KeyCode::Char('2') => Some(EditorCommand::JumpToTab(1)),
-            KeyCode::Char('3') => Some(EditorCommand::JumpToTab(2)),
-            KeyCode::Char('4') => Some(EditorCommand::JumpToTab(3)),
-            KeyCode::Char('5') => Some(EditorCommand::JumpToTab(4)),
-            KeyCode::Char('6') => Some(EditorCommand::JumpToTab(5)),
-            KeyCode::Char('7') => Some(EditorCommand::JumpToTab(6)),
-            KeyCode::Char('8') => Some(EditorCommand::JumpToTab(7)),
-            KeyCode::Char('9') => Some(EditorCommand::JumpToTab(8)),
+            KeyCode::Char(c @ '1'..='9') => Some(EditorCommand::JumpToTab((c as usize) - ('1' as usize))),
             _ => None,
         };
         if let Some(cmd) = cmd {

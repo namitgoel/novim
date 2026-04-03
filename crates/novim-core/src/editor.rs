@@ -263,7 +263,9 @@ impl Workspace {
                     let lang_id = server.language_id.clone();
                     self.lsp_clients.insert(lang_id, client);
                 }
-                Err(_e) => {}
+                Err(e) => {
+                    log::warn!("Failed to spawn LSP server for {}: {}", server.language_id, e);
+                }
             }
         }
     }

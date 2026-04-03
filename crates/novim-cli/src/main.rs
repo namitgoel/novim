@@ -94,32 +94,30 @@ fn main() {
     }
 }
 
-/// Open the welcome screen (no args).
-fn run_welcome() -> io::Result<()> {
-    let mut tm = TerminalManager::with_welcome()?;
+/// Run a TerminalManager to completion: run the event loop then shut down.
+fn run_terminal(mut tm: TerminalManager) -> io::Result<()> {
     tm.run()?;
     tm.shutdown()
+}
+
+/// Open the welcome screen (no args).
+fn run_welcome() -> io::Result<()> {
+    run_terminal(TerminalManager::with_welcome()?)
 }
 
 /// Open a directory with explorer sidebar.
 fn run_with_dir(path: &str) -> io::Result<()> {
-    let mut tm = TerminalManager::with_dir(path)?;
-    tm.run()?;
-    tm.shutdown()
+    run_terminal(TerminalManager::with_dir(path)?)
 }
 
 /// Open a file in the editor.
 fn run_with_file(path: &str) -> io::Result<()> {
-    let mut tm = TerminalManager::with_file(path)?;
-    tm.run()?;
-    tm.shutdown()
+    run_terminal(TerminalManager::with_file(path)?)
 }
 
 /// Restore a saved session.
 fn run_attach(name: &str) -> io::Result<()> {
-    let mut tm = TerminalManager::with_session(name)?;
-    tm.run()?;
-    tm.shutdown()
+    run_terminal(TerminalManager::with_session(name)?)
 }
 
 /// List saved sessions.
@@ -168,9 +166,7 @@ fn run_config(action: ConfigAction) -> io::Result<()> {
             }
 
             let path_str = path.to_string_lossy().to_string();
-            let mut tm = TerminalManager::with_file(&path_str)?;
-            tm.run()?;
-            tm.shutdown()
+            run_terminal(TerminalManager::with_file(&path_str)?)
         }
         ConfigAction::Reset => {
             let msg = config::save_default_config()?;
