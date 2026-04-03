@@ -296,6 +296,14 @@ impl winit::application::ApplicationHandler<UserEvent> for Application {
                     }
                 }
                 state.editor.poll_active_lsp();
+
+                // Poll plugin scheduled/deferred callbacks
+                let screen = novim_types::Rect::new(0, 0, state.gpu.surface_config.width as u16, state.gpu.surface_config.height as u16);
+                let timer_actions = state.editor.plugins.poll_timers();
+                if !timer_actions.is_empty() {
+                    state.editor.run_plugin_actions(timer_actions, screen);
+                    self.needs_redraw = true;
+                }
             }
 
             let poll_dirty = self.poll_dirty.swap(false, Ordering::Relaxed);

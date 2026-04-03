@@ -16,6 +16,7 @@ pub struct PluginManager {
     pub keymaps: KeymapRegistry,
     is_gui: bool,
     plugin_configs: HashMap<String, HashMap<String, toml::Value>>,
+    load_errors: Vec<String>,
 }
 
 impl PluginManager {
@@ -31,6 +32,7 @@ impl PluginManager {
             keymaps: KeymapRegistry::new(),
             is_gui,
             plugin_configs,
+            load_errors: Vec::new(),
         }
     }
 
@@ -113,6 +115,38 @@ impl PluginManager {
         self.registry.lookup(name).is_some()
     }
 
+    /// Take accumulated load errors (clears the list).
+    pub fn take_load_errors(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.load_errors)
+    }
+
+    /// Reload a Lua plugin file. Unregisters old plugin, loads fresh.
+    pub fn reload_file(&mut self, path: &std::path::Path) {
+        // Find and remove any plugin loaded from this path
+        let mut removed_id = None;
+        self.plugins.retain(|p| {
+            let id = p.id().to_string();
+            let expected_id = path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| format!("user.{}", s))
+                .unwrap_or_default();
+            if id == expected_id {
+                removed_id = Some(id);
+                false
+            } else {
+                true
+            }
+        });
+        if let Some(id) = &removed_id {
+            self.enabled.remove(id);
+            self.error_counts.remove(id);
+            self.registry.unregister_plugin(id);
+            self.keymaps.unregister_plugin(id);
+        }
+        // Re-load
+        self.load_one_lua(path);
+    }
+
     /// Poll all plugins for scheduled/deferred callbacks. Returns actions.
     pub fn poll_timers(&mut self) -> Vec<PluginAction> {
         let mut all_actions = Vec::new();
@@ -187,7 +221,9 @@ impl PluginManager {
                 self.plugins.push(Box::new(plugin));
             }
             Err(e) => {
-                log::error!("Failed to load Lua plugin {}: {}", path.display(), e);
+                let msg = format!("Failed to load {}: {}", path.display(), e);
+                log::error!("{}", msg);
+                self.load_errors.push(msg);
             }
         }
     }

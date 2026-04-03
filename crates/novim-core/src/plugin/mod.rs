@@ -136,6 +136,11 @@ impl KeymapRegistry {
         );
     }
 
+    /// Remove all keymaps owned by a plugin.
+    pub fn unregister_plugin(&mut self, plugin_id: &str) {
+        self.keymaps.retain(|_, entry| entry.plugin_id != plugin_id);
+    }
+
     /// Look up a keymap for the given mode and key string.
     pub fn lookup(&self, mode: &str, key: &str) -> Option<&KeymapEntry> {
         self.keymaps.get(&(mode.to_string(), key.to_string()))

@@ -372,6 +372,13 @@ pub struct EditorState {
     pub show_welcome: bool,
     /// Plugin popup overlay (title, lines, scroll, width, height).
     pub plugin_popup: Option<PluginPopup>,
+    /// Jump list for Ctrl+O / Ctrl+I navigation.
+    pub jump_list: Vec<(String, novim_types::Position)>,
+    pub jump_index: usize,
+    /// Named marks (a-z) → (file_path, position).
+    pub marks: HashMap<char, (String, novim_types::Position)>,
+    /// Current git branch name (for status bar).
+    pub git_branch: Option<String>,
     /// Plugin system manager.
     pub plugins: PluginManager,
 }
@@ -428,6 +435,20 @@ impl EditorState {
         let mut plugins = PluginManager::new(false, std::collections::HashMap::new());
         crate::plugin::builtins::register_builtins(&mut plugins);
         plugins.load_lua_plugins();
+        let git_branch = std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            });
+        let load_errors = plugins.take_load_errors();
+        let status_message = if !load_errors.is_empty() {
+            Some(format!("Plugin errors: {}", load_errors.join("; ")))
+        } else {
+            status_message
+        };
         Self {
             tabs,
             active_tab,
@@ -451,6 +472,10 @@ impl EditorState {
             workspace_list_selected: 0,
             show_welcome: false,
             plugin_popup: None,
+            jump_list: Vec::new(),
+            jump_index: 0,
+            marks: HashMap::new(),
+            git_branch,
             plugins,
         }
     }
@@ -577,6 +602,21 @@ impl EditorState {
             }
         }
         result
+    }
+
+    /// Record the current position in the jump list before a big jump.
+    pub fn push_jump(&mut self) {
+        let path = self.focused_buf().display_name();
+        let pos = self.focused_buf().cursor();
+        // Truncate any forward history
+        self.jump_list.truncate(self.jump_index);
+        self.jump_list.push((path, pos));
+        self.jump_index = self.jump_list.len();
+        // Cap at 100 entries
+        if self.jump_list.len() > 100 {
+            self.jump_list.remove(0);
+            self.jump_index = self.jump_list.len();
+        }
     }
 
     /// Build a read-only snapshot of the focused buffer for plugin dispatch.
@@ -951,7 +991,10 @@ impl EditorState {
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::SaveSession(name) => self.handle_save_session(&name),
-            EditorCommand::EditFile(path) => self.handle_edit_file(&path),
+            EditorCommand::EditFile(path) => {
+                self.push_jump();
+                self.handle_edit_file(&path)
+            }
             EditorCommand::CommandInput(c) => {
                 self.command_buffer.push(c);
                 Ok(ExecOutcome::Continue)
@@ -1137,6 +1180,7 @@ impl EditorState {
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::GotoDefinition => {
+                self.push_jump();
                 let msg = self.with_lsp_client(|client, uri, cursor| {
                     match client.goto_definition(uri, cursor.line as u32, cursor.column as u32) {
                         Ok(()) => Some("Looking up definition...".to_string()),
@@ -1216,6 +1260,7 @@ impl EditorState {
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::SearchExecute => {
+                self.push_jump();
                 let pattern = self.search.buffer.clone();
                 self.search.active = false;
                 if !pattern.is_empty() {
@@ -1452,6 +1497,71 @@ impl EditorState {
                     }).collect();
                     self.status_message = Some(items.join(" | "));
                 }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::JumpBack => {
+                if self.jump_index > 0 {
+                    self.jump_index -= 1;
+                    if let Some((path, pos)) = self.jump_list.get(self.jump_index).cloned() {
+                        let current_name = self.focused_buf().display_name();
+                        if path != current_name {
+                            let _ = self.handle_edit_file(&path);
+                        }
+                        self.focused_buf_mut().set_cursor_pos(pos);
+                    }
+                } else {
+                    self.status_message = Some("Already at oldest jump".to_string());
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::JumpForward => {
+                if self.jump_index + 1 < self.jump_list.len() {
+                    self.jump_index += 1;
+                    if let Some((path, pos)) = self.jump_list.get(self.jump_index).cloned() {
+                        let current_name = self.focused_buf().display_name();
+                        if path != current_name {
+                            let _ = self.handle_edit_file(&path);
+                        }
+                        self.focused_buf_mut().set_cursor_pos(pos);
+                    }
+                } else {
+                    self.status_message = Some("Already at newest jump".to_string());
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::SetMark(c) => {
+                let path = self.focused_buf().display_name();
+                let pos = self.focused_buf().cursor();
+                self.marks.insert(c, (path, pos));
+                self.status_message = Some(format!("Mark '{}' set", c));
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::JumpToMark(c, exact) => {
+                if let Some((path, pos)) = self.marks.get(&c).cloned() {
+                    self.push_jump();
+                    let current_name = self.focused_buf().display_name();
+                    if path != current_name {
+                        let _ = self.handle_edit_file(&path);
+                    }
+                    if exact {
+                        self.focused_buf_mut().set_cursor_pos(pos);
+                    } else {
+                        self.focused_buf_mut().set_cursor_pos(novim_types::Position::new(pos.line, 0));
+                    }
+                } else {
+                    self.status_message = Some(format!("Mark '{}' not set", c));
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::SourceFile(path) => {
+                let resolved = if path.starts_with('/') || path.starts_with('~') {
+                    let p = path.replace('~', &std::env::var("HOME").unwrap_or_default());
+                    std::path::PathBuf::from(p)
+                } else {
+                    self.tabs[self.active_tab].shell_cwd().join(&path)
+                };
+                self.plugins.reload_file(&resolved);
+                self.status_message = Some(format!("Reloaded: {}", resolved.display()));
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::PluginCommand(name, args) => {
@@ -1736,6 +1846,30 @@ impl EditorState {
     }
 
     fn handle_set_option(&mut self, opt: &str) -> Result<ExecOutcome, NovimError> {
+        // Query: `:set all` shows all options, `:set tabstop?` shows one
+        if opt == "all" {
+            self.status_message = Some(format!(
+                "ts={} et={} ai={} wrap={} ln={}",
+                self.config.editor.tab_width,
+                self.config.editor.expand_tab,
+                self.config.editor.auto_indent,
+                self.config.editor.word_wrap,
+                self.config.editor.line_numbers,
+            ));
+            return Ok(ExecOutcome::Continue);
+        }
+        if let Some(name) = opt.strip_suffix('?') {
+            let val = match name {
+                "tabstop" | "ts" => format!("tabstop={}", self.config.editor.tab_width),
+                "expandtab" | "et" => format!("expandtab={}", self.config.editor.expand_tab),
+                "autoindent" | "ai" => format!("autoindent={}", self.config.editor.auto_indent),
+                "wrap" => format!("wrap={}", self.config.editor.word_wrap),
+                "number" | "nu" | "rnu" | "nonu" => format!("line_numbers={}", self.config.editor.line_numbers),
+                _ => format!("Unknown option: {}", name),
+            };
+            self.status_message = Some(val);
+            return Ok(ExecOutcome::Continue);
+        }
         match opt {
             "number" | "nu" => {
                 self.line_number_mode = LineNumberMode::Absolute;

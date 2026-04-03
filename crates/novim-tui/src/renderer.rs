@@ -634,9 +634,12 @@ fn render_status_bar(f: &mut ratatui::Frame, area: Rect, state: &mut EditorState
         String::new()
     };
 
+    let branch = state.git_branch.as_deref().map(|b| format!(" {}", b)).unwrap_or_default();
+
     let right = format!(
-        "{} | {}:{} | {}/{} ",
+        "{}{} | {}:{} | {}/{} ",
         lsp_status,
+        branch,
         cursor.line + 1,
         cursor.column + 1,
         cursor.line + 1,

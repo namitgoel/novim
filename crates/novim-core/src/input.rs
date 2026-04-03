@@ -240,6 +240,16 @@ pub enum EditorCommand {
     Echo(String),
     /// List all loaded plugins.
     PluginList,
+    /// Jump backward in jump list.
+    JumpBack,
+    /// Jump forward in jump list.
+    JumpForward,
+    /// Set a mark at the current cursor position.
+    SetMark(char),
+    /// Jump to a mark. Bool = exact position (true) vs line-only (false).
+    JumpToMark(char, bool),
+    /// Reload a Lua plugin file.
+    SourceFile(String),
     /// A plugin-registered command (name, args).
     PluginCommand(String, String),
     Noop,
@@ -263,6 +273,10 @@ pub enum InputState {
     WaitingMacroRegister,
     /// Waiting for register name after '@' (replay)
     WaitingReplayRegister,
+    /// Waiting for mark register after 'm'
+    WaitingMarkSet,
+    /// Waiting for mark register after ' or `. Bool = exact position.
+    WaitingMarkJump(bool),
 }
 
 /// Pending operator (d = delete, c = change)
@@ -343,6 +357,20 @@ pub fn key_to_command(
             KeyCode::Char('a') => (EditorCommand::ToggleFold, InputState::Ready),
             KeyCode::Char('M') => (EditorCommand::FoldAll, InputState::Ready),
             KeyCode::Char('R') => (EditorCommand::UnfoldAll, InputState::Ready),
+            _ => (EditorCommand::Noop, InputState::Ready),
+        };
+    }
+
+    if input_state == InputState::WaitingMarkSet {
+        return match key.code {
+            KeyCode::Char(c) if c.is_ascii_lowercase() => (EditorCommand::SetMark(c), InputState::Ready),
+            _ => (EditorCommand::Noop, InputState::Ready),
+        };
+    }
+
+    if let InputState::WaitingMarkJump(exact) = input_state {
+        return match key.code {
+            KeyCode::Char(c) if c.is_ascii_lowercase() => (EditorCommand::JumpToMark(c, exact), InputState::Ready),
             _ => (EditorCommand::Noop, InputState::Ready),
         };
     }
@@ -554,6 +582,14 @@ fn normal_mode_command(key: KeyEvent) -> (EditorCommand, InputState) {
         KeyCode::Char('0') => (EditorCommand::MoveCursor(Direction::LineStart), InputState::Ready),
         KeyCode::Char('$') => (EditorCommand::MoveCursor(Direction::LineEnd), InputState::Ready),
         KeyCode::Char('G') => (EditorCommand::MoveCursor(Direction::FileEnd), InputState::Ready),
+        // Marks
+        KeyCode::Char('m') => (EditorCommand::Noop, InputState::WaitingMarkSet),
+        KeyCode::Char('\'') => (EditorCommand::Noop, InputState::WaitingMarkJump(false)),
+        KeyCode::Char('`') => (EditorCommand::Noop, InputState::WaitingMarkJump(true)),
+        // Jump list
+        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            (EditorCommand::JumpBack, InputState::Ready)
+        }
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             (EditorCommand::Save, InputState::Ready)
         }
@@ -731,6 +767,13 @@ pub fn parse_ex_command(input: &str) -> EditorCommand {
         "help" | "h" => EditorCommand::ToggleHelp,
         "echo" => EditorCommand::Echo(args.to_string()),
         "PluginList" | "pluginlist" | "plugins" => EditorCommand::PluginList,
+        "source" | "so" => {
+            if args.is_empty() {
+                EditorCommand::Noop
+            } else {
+                EditorCommand::SourceFile(args.to_string())
+            }
+        }
         "set" => {
             if args.is_empty() {
                 EditorCommand::Noop

@@ -361,13 +361,17 @@ cargo build --release -p novim-neon
 
 ```
 crates/novim-core/src/plugin/
-├── mod.rs          # Plugin trait, PluginAction, BufferSnapshot, EditorEvent,
-│                   #   PluginContext, KeymapRegistry, PluginError
-├── lua_bridge.rs   # LuaPlugin — wraps Lua scripts as Plugin impls
-│                   #   Full novim.* API, snapshot injection, action queue
-├── manager.rs      # PluginManager — lifecycle, dispatch, timer polling,
-│                   #   Lua plugin discovery, keymap registry
-└── registry.rs     # CommandRegistry — plugin-defined ex-commands
+├── mod.rs           # Plugin trait, PluginAction, BufferSnapshot, EditorEvent,
+│                    #   PluginContext, KeymapRegistry, GutterSign, PluginError
+├── lua_bridge.rs    # LuaPlugin — wraps Lua scripts as Plugin impls
+│                    #   Full novim.* API, snapshot injection, action queue
+├── manager.rs       # PluginManager — lifecycle, dispatch, timer polling,
+│                    #   Lua plugin discovery, keymap registry
+├── registry.rs      # CommandRegistry — plugin-defined ex-commands
+└── builtins/
+    ├── mod.rs       # register_builtins()
+    ├── git_signs.rs # Git gutter signs (owns git2 diff logic, fully plugin-driven)
+    └── syntax.rs    # Tree-sitter syntax highlighting (moved from core)
 ```
 
 **Plugin trait:**
@@ -390,6 +394,7 @@ pub trait Plugin: Send {
 - Plugin keymaps checked before config keybindings in TUI + GUI event loops
 - `poll_timers()` called every 16ms tick for scheduled/deferred callbacks
 - Plugins loaded from `~/.config/novim/init.lua` + `~/.config/novim/plugins/*.lua`
+- Built-in features disabled via config: `[plugins.git_signs] enabled = false`
 
 ### Lua Plugin API
 
@@ -400,7 +405,7 @@ pub trait Plugin: Send {
 | **Buffer Write** | `novim.buf.set_lines(start, end, lines)`, `insert(line, col, text)`, `set_cursor(line, col)` |
 | **Selection** | `novim.buf.get_selection()`, `selected_text()`, `set_selection(sl, sc, el, ec)`, `clear_selection()` |
 | **Shell/File** | `novim.fn.shell(cmd)`, `readfile(path)`, `writefile(path, lines)`, `glob(pattern)` |
-| **UI** | `novim.ui.status(msg)`, `log(msg)` |
+| **UI** | `novim.ui.status(msg)`, `log(msg)`, `popup(title, lines, [opts])` |
 | **Keymaps** | `novim.keymap(mode, key, cmd_or_fn)` |
 | **Options** | `novim.opt.get(name)`, `novim.opt.set(name, value)` |
 | **Windows** | `novim.win.split(dir)`, `close()`, `count()` |
@@ -409,13 +414,48 @@ pub trait Plugin: Send {
 | **Scheduling** | `novim.schedule(fn)`, `novim.defer(ms, fn)` |
 | **LSP** | `novim.lsp.on_attach(fn)` |
 
+**Popup system:**
+- `novim.ui.popup(title, lines)` — display-only, scrollable
+- `novim.ui.popup(title, lines, { width=60, height=20 })` — custom size
+- `novim.ui.popup(title, lines, { on_select=fn(index, text) })` — selectable list with highlighted cursor, Enter to select
+
 **Editor Events:** BufOpen, BufEnter, BufLeave, BufWrite, BufClose, TextChanged, CursorMoved, ModeChanged, CommandExecuted, Custom, LspAttach
 
-**PluginAction variants:** ExecCommand, SetLines, InsertText, SetCursor, SetStatus, RegisterKeymap, SetSelection, ClearSelection, EmitEvent
+**PluginAction variants:** ExecCommand, SetLines, InsertText, SetCursor, SetStatus, RegisterKeymap, SetSelection, ClearSelection, EmitEvent, SetGutterSigns, ShowPopup
+
+### Built-in Feature Migration
+
+| Feature | Status | Location |
+|---------|--------|----------|
+| Git signs | Fully migrated | `plugin/builtins/git_signs.rs` — owns `git2` diff logic |
+| Syntax highlighting | Module moved | `plugin/builtins/syntax.rs` — still Buffer-integrated |
+| LSP | Not migrated | Too stateful/async for plugin pattern |
+| Explorer | Not migrated | Needs dedicated UI panel |
+| Finder | Not migrated | Needs popup UI with fuzzy matching |
+
+### Commands Added
+
+| Command | Description |
+|---------|-------------|
+| `:PluginList` / `:plugins` | Show all loaded plugins with status |
+| `:echo <msg>` | Display message in status bar |
+| `:<PluginCmd>` | Route to plugin-registered commands |
+
+### Example Plugins
+
+```
+examples/plugins/
+├── auto_save.lua        # Save on leaving insert mode
+├── bookmark.lua         # Line bookmarks with selectable popup (Ctrl+b / :Bookmarks)
+├── format_on_save.lua   # rustfmt/black/prettier on save (pattern-filtered)
+├── git_branch.lua       # Show git branch on file open
+├── quick_run.lua        # :Run — execute file with appropriate interpreter
+├── trim_whitespace.lua  # Strip trailing whitespace on save
+├── word_count.lua       # Ctrl+g — file stats popup
+└── zen_mode.lua         # :Zen — toggle distraction-free mode
+```
 
 ### Multi-Platform Release
-
-Ship three targets from the same `novim-core` engine:
 
 ```
               novim-core (engine + plugin system)
@@ -433,6 +473,33 @@ Ship three targets from the same `novim-core` engine:
 
 ---
 
+## v1.1.0 — Polish & Gaps
+
+### Plugin System Gaps
+- GUI popup rendering (currently TUI-only)
+- `novim.defer()` timer polling in GUI event loop (currently TUI-only)
+- Error auto-disable (disable plugin after N consecutive errors)
+- Plugin manifest (name, version, dependencies in `.toml`)
+- Plugin install from git URLs / package manager
+
+### Missing Vim Features
+- Registers (`"a`, `"b`, `"+` for system clipboard)
+- Marks (`ma`, `'a` to jump back)
+- Jump list (`Ctrl+O`, `Ctrl+I`)
+- `:substitute` with flags (`/g`, `/c`, `/i`)
+- Dot repeat (`.` to repeat last change)
+- Block visual mode (`Ctrl+V`)
+- Ex-command range (`:5,10d`, `:.,$s/...`)
+- `:source` to reload config/plugins
+
+### Editor Quality
+- Status bar shows git branch natively
+- Status bar shows cursor position (line:col)
+- Better error messages for failed plugin loads
+- `:set` shows current value when no arg (`:set ts` → `tabstop=4`)
+
+---
+
 ## v2.0.0+ — Long-term Vision
 
 - Collaborative editing (CRDT-based)
@@ -445,6 +512,6 @@ Ship three targets from the same `novim-core` engine:
 - Minimap / code overview
 - Breadcrumbs / symbol outline
 - DAP (Debug Adapter Protocol) integration
-- `:PluginList` command showing all plugins + status
-- Plugin manifest (name, version, dependencies)
-- Built-in feature migration (git_signs, syntax, LSP as real plugins with buffer access)
+- Floating windows (plugin-created, resizable)
+- LSP migration to plugin (if async plugin model is built)
+- Tree-sitter based code navigation (go to function, list symbols)
