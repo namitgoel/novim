@@ -29,6 +29,46 @@ impl<'a> Perform for GridPerformer<'a> {
     fn put(&mut self, _byte: u8) {}
     fn unhook(&mut self) {}
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if let Some(first) = params.first() {
+            // OSC 133 — Shell integration / prompt markers
+            // Format: \x1b]133;A\x07 (prompt start), B (command start), C (output start), D (done)
+            if *first == b"133" {
+                if let Some(type_byte) = params.get(1) {
+                    if !type_byte.is_empty() {
+                        match type_byte[0] {
+                            b'A' => {
+                                // Prompt start — record this position for prompt navigation
+                                self.grid.add_prompt_mark();
+                            }
+                            // B, C, D are recognized but no action needed yet
+                            _ => {}
+                        }
+                    }
+                }
+                return;
+            }
+
+            // OSC 8 — Hyperlinks
+            // Format: \x1b]8;params;uri\x07 (open) or \x1b]8;;\x07 (close)
+            if *first == b"8" {
+                // params[1] = optional params (id=...), params[2] = URI
+                // If URI is empty, this closes the hyperlink
+                if let Some(uri_bytes) = params.get(2) {
+                    if let Ok(uri) = std::str::from_utf8(uri_bytes) {
+                        if uri.is_empty() {
+                            self.grid.active_hyperlink = None;
+                        } else {
+                            self.grid.active_hyperlink = Some(uri.to_string());
+                        }
+                    }
+                } else if params.len() == 2 {
+                    // OSC 8;; with no third param = close
+                    self.grid.active_hyperlink = None;
+                }
+                return;
+            }
+        }
+
         // OSC 7 — Shell CWD integration
         // Format: \x1b]7;file:///path\x07  or  \x1b]7;file://host/path\x07
         // VTE splits on ';' so params[0] = b"7", params[1] = b"file:///path"
@@ -225,10 +265,17 @@ impl<'a> GridPerformer<'a> {
                 36 => self.grid.set_pen_fg(CellColor::Cyan),
                 37 => self.grid.set_pen_fg(CellColor::White),
                 38 => {
-                    // Extended foreground: 38;5;N (256-color)
                     if i + 2 < params.len() && params[i + 1] == 5 {
+                        // 256-color: 38;5;N
                         self.grid.set_pen_fg(CellColor::Indexed(params[i + 2] as u8));
                         i += 2;
+                    } else if i + 4 < params.len() && params[i + 1] == 2 {
+                        // 24-bit true color: 38;2;R;G;B
+                        let r = params[i + 2] as u8;
+                        let g = params[i + 3] as u8;
+                        let b = params[i + 4] as u8;
+                        self.grid.set_pen_fg(CellColor::Rgb(r, g, b));
+                        i += 4;
                     }
                 }
                 39 => self.grid.set_pen_fg(CellColor::Default),
@@ -243,10 +290,17 @@ impl<'a> GridPerformer<'a> {
                 46 => self.grid.set_pen_bg(CellColor::Cyan),
                 47 => self.grid.set_pen_bg(CellColor::White),
                 48 => {
-                    // Extended background: 48;5;N (256-color)
                     if i + 2 < params.len() && params[i + 1] == 5 {
+                        // 256-color: 48;5;N
                         self.grid.set_pen_bg(CellColor::Indexed(params[i + 2] as u8));
                         i += 2;
+                    } else if i + 4 < params.len() && params[i + 1] == 2 {
+                        // 24-bit true color: 48;2;R;G;B
+                        let r = params[i + 2] as u8;
+                        let g = params[i + 3] as u8;
+                        let b = params[i + 4] as u8;
+                        self.grid.set_pen_bg(CellColor::Rgb(r, g, b));
+                        i += 4;
                     }
                 }
                 49 => self.grid.set_pen_bg(CellColor::Default),

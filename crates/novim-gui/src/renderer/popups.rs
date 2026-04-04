@@ -2,6 +2,7 @@
 
 use glyphon::Color;
 use novim_core::editor::EditorState;
+use novim_core::help::{help_entries, help_entry_to_plain};
 
 use super::theme::*;
 
@@ -225,72 +226,8 @@ pub(super) fn overlay_help(
     let x = (cols.saturating_sub(popup_w)) / 2;
     let y = (rows.saturating_sub(popup_h)) / 2;
 
-    let help_lines = vec![
-        "Novim Shortcuts",
-        "",
-        "── Navigation ──",
-        "h/j/k/l        Move cursor",
-        "w / b / e      Word fwd / back / end",
-        "0 / $          Line start / end",
-        "gg / G         File start / end",
-        "f/F + char     Find char fwd / back",
-        "t/T + char     Till char fwd / back",
-        "; / ,          Repeat / reverse find",
-        "{ / }          Paragraph back / fwd",
-        "( / )          Sentence back / fwd",
-        "%              Matching bracket",
-        "* / #          Search word fwd / back",
-        "Ctrl+U/D       Scroll half page",
-        "Ctrl+B/PgUp/Dn Scroll full page",
-        "zz / zt / zb   Center / top / bottom",
-        "",
-        "── Editing ──",
-        "i / a / I / A  Insert / Append modes",
-        "o / O          Open line below / above",
-        "R              Replace mode (overtype)",
-        "r + char       Replace single char",
-        "x / ~          Delete fwd / Toggle case",
-        "dd / cc / C    Delete / Change line / EOL",
-        "D / S / J      Del to end / Subst / Join",
-        ">> / <<        Indent / Dedent",
-        "yy / p / P     Yank / Paste after / before",
-        "u / Ctrl+R     Undo / Redo",
-        ". (dot)        Repeat last edit",
-        "\"a + y/d/p    Use register a",
-        "gv             Reselect last visual",
-        "",
-        "── Cmd Shortcuts (GUI) ──",
-        "Cmd+P / Cmd+F  File finder",
-        "Cmd+E          Toggle explorer",
-        "Cmd+T          New terminal",
-        "Cmd+S          Save",
-        "Cmd+W ...      Pane commands",
-        "Cmd+N          Next tab",
-        "Cmd+Q          Quit",
-        "Cmd+/          Search",
-        "Cmd+?          This help",
-        "",
-        "── Pane Commands (Ctrl+W) ──",
-        "Ctrl+W s/v     Split H / V",
-        "Ctrl+W h/j/k/l Focus direction",
-        "Ctrl+W q       Close pane",
-        "Ctrl+W t       Open terminal",
-        "Ctrl+W x       Swap panes",
-        "Ctrl+W z       Toggle zoom",
-        "Ctrl+W +/-/>/< Resize pane",
-        "Ctrl+W [       Terminal copy mode",
-        "Ctrl+W f       File finder",
-        "",
-        "── Commands ──",
-        ":w / :q / :wq  Save / Quit",
-        ":e <file>      Open file",
-        ":!cmd          Run shell command",
-        "gx / gf        Open URL / file at cursor",
-        ":marks / :reg  List marks / registers",
-        "Ctrl+O / Ctrl+I Jump back / forward",
-        "",
-        "Press Esc or ? to close",
-    ];
+    let entries = help_entries();
+    let help_lines: Vec<String> = entries.iter().map(|e| help_entry_to_plain(e).1).collect();
 
     let title = " Help ";
     let border_top = format!("╭{}{}╮", title, "─".repeat(popup_w.saturating_sub(title.len() + 2)));
@@ -301,7 +238,7 @@ pub(super) fn overlay_help(
     for i in 0..visible {
         let row = y + 1 + i;
         let idx = scroll + i;
-        let text = if idx < help_lines.len() { help_lines[idx] } else { "" };
+        let text = if idx < help_lines.len() { &help_lines[idx] } else { "" };
         let line = format!("│ {}{}│",
             text,
             " ".repeat(popup_w.saturating_sub(text.len() + 4).max(0)),

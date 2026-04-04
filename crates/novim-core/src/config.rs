@@ -16,6 +16,7 @@ pub struct NovimConfig {
     pub lsp: LspConfig,
     pub keybindings: KeybindingsConfig,
     pub gui: GuiConfig,
+    pub status_bar: StatusBarConfig,
 }
 
 /// GUI-specific configuration (font, window settings).
@@ -60,6 +61,33 @@ pub struct EditorConfig {
     pub scroll_lines: usize,
     /// Lines to scroll per mouse wheel tick
     pub mouse_scroll_lines: usize,
+    /// Text width for `gq` formatting (0 = use 80)
+    pub text_width: usize,
+    /// Show minimap code overview on the right side of editor panes.
+    pub minimap: bool,
+    /// Minimap width in columns (default 8).
+    pub minimap_width: usize,
+}
+
+/// Status bar display configuration.
+/// Format placeholders: {mode}, {file}, {modified}, {line}, {col}, {total},
+/// {percent}, {lsp}, {branch}, {diag}, {pane}, {message}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatusBarConfig {
+    /// Format string for the left side of the status bar.
+    pub left: String,
+    /// Format string for the right side of the status bar.
+    pub right: String,
+}
+
+impl Default for StatusBarConfig {
+    fn default() -> Self {
+        Self {
+            left: " {mode} | {message}{diag}{pane}".to_string(),
+            right: "{lsp}{branch} | {line}:{col} | {line}/{total} ".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +232,9 @@ impl Default for EditorConfig {
             word_wrap: false,
             scroll_lines: 10,
             mouse_scroll_lines: 3,
+            text_width: 80,
+            minimap: false,
+            minimap_width: 8,
         }
     }
 }

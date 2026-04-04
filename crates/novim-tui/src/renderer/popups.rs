@@ -7,6 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
+use novim_core::help::{HelpEntry, help_entries};
 use super::styling::apply_highlights;
 use super::EditorState;
 
@@ -25,121 +26,20 @@ pub(super) fn render_help_popup(f: &mut ratatui::Frame, area: Rect, scroll: usiz
     let d = Style::default().fg(Color::White);
     let dim = Style::default().fg(Color::DarkGray);
 
-    let all_lines = vec![
-        Line::from(Span::styled("  Keyboard Shortcuts", h)),
-        Line::from(""),
-        Line::from(Span::styled("  Navigation", h)),
-        help_line("  h/j/k/l", "Move cursor", k, d),
-        help_line("  w / b / e", "Word forward / back / end", k, d),
-        help_line("  0 / $", "Line start / end", k, d),
-        help_line("  gg / G", "File start / end", k, d),
-        help_line("  f/F + char", "Find char forward / back", k, d),
-        help_line("  t/T + char", "Till char forward / back", k, d),
-        help_line("  ; / ,", "Repeat / reverse find", k, d),
-        help_line("  { / }", "Paragraph back / forward", k, d),
-        help_line("  ( / )", "Sentence back / forward", k, d),
-        help_line("  %", "Matching bracket", k, d),
-        help_line("  * / #", "Search word fwd / back", k, d),
-        help_line("  Ctrl+U / Ctrl+D", "Scroll half page", k, d),
-        help_line("  Ctrl+B / PgUp/Dn", "Scroll full page", k, d),
-        help_line("  zz / zt / zb", "Center / top / bottom", k, d),
-        help_line("  5j / 3k", "Move N lines", k, d),
-        help_line("  /pattern", "Search (regex)", k, d),
-        help_line("  n / N", "Next / prev match", k, d),
-        help_line("  Esc", "Normal mode", k, d),
-        Line::from(""),
-        Line::from(Span::styled("  Editing", h)),
-        help_line("  i / a", "Insert / Append", k, d),
-        help_line("  I / A", "Insert line start / end", k, d),
-        help_line("  o / O", "Open line below / above", k, d),
-        help_line("  v / Ctrl+V", "Visual / Block select", k, d),
-        help_line("  gv", "Reselect last visual", k, d),
-        help_line("  R", "Replace mode (overtype)", k, d),
-        help_line("  r + char", "Replace single char", k, d),
-        help_line("  x", "Delete char forward", k, d),
-        help_line("  ~", "Toggle case", k, d),
-        help_line("  u / Ctrl+R", "Undo / Redo", k, d),
-        help_line("  p / P", "Paste after / before", k, d),
-        help_line("  dd / 3dd", "Delete line(s)", k, d),
-        help_line("  cc / C", "Change line / to end", k, d),
-        help_line("  D / S", "Delete to end / Subst line", k, d),
-        help_line("  J", "Join lines", k, d),
-        help_line("  >> / <<", "Indent / Dedent", k, d),
-        help_line("  \"a + y/d/p", "Use register a", k, d),
-        help_line("  .", "Repeat last edit", k, d),
-        help_line("  :", "Command mode", k, d),
-        Line::from(""),
-        Line::from(Span::styled("  File", h)),
-        help_line("  Ctrl+S / :w", "Save", k, d),
-        help_line("  :q / :q! / :wq", "Quit / Force / Save+quit", k, d),
-        help_line("  :e <file>", "Open file", k, d),
-        help_line("  Ctrl+F", "File finder", k, d),
-        help_line("  :explore", "File explorer", k, d),
-        help_line("  :ls", "Buffer list", k, d),
-        help_line("  :bn / :bp", "Next / prev buffer", k, d),
-        Line::from(""),
-        Line::from(Span::styled("  Panes (Ctrl+W prefix)", h)),
-        help_line("  Ctrl+W v / s", "Split vertical / horiz", k, d),
-        help_line("  Ctrl+W h/j/k/l", "Move focus", k, d),
-        help_line("  Ctrl+W q", "Close pane", k, d),
-        help_line("  Ctrl+W t", "Open terminal", k, d),
-        help_line("  Ctrl+W x", "Swap panes", k, d),
-        help_line("  Ctrl+W z", "Toggle zoom pane", k, d),
-        help_line("  Ctrl+W +/-/>/<", "Resize pane", k, d),
-        help_line("  Ctrl+W [", "Terminal copy mode", k, d),
-        help_line("  Ctrl+W f", "File finder", k, d),
-        help_line("  Ctrl+W e", "Focus explorer", k, d),
-        Line::from(""),
-        Line::from(Span::styled("  Workspaces", h)),
-        help_line("  :tabnew <path>", "New workspace", k, d),
-        help_line("  gt / gT", "Next / prev workspace", k, d),
-        help_line("  Ctrl+W n / N", "Next / prev workspace", k, d),
-        help_line("  Ctrl+W L", "List workspaces", k, d),
-        help_line("  Ctrl+W 1-9", "Jump to workspace", k, d),
-        help_line("  :tabclose", "Close workspace", k, d),
-        help_line("  :tabrename <n>", "Rename workspace", k, d),
-        Line::from(""),
-        Line::from(Span::styled("  Folding", h)),
-        help_line("  za", "Toggle fold at cursor", k, d),
-        help_line("  zM", "Fold all", k, d),
-        help_line("  zR", "Unfold all", k, d),
-        Line::from(""),
-        Line::from(Span::styled("  Multi-Cursor", h)),
-        help_line("  Alt+Up", "Add cursor above", k, d),
-        help_line("  Alt+Down", "Add cursor below", k, d),
-        help_line("  Esc", "Clear extra cursors", k, d),
-        Line::from(""),
-        Line::from(Span::styled("  LSP", h)),
-        help_line("  gd", "Go to definition", k, d),
-        help_line("  K (shift)", "Hover info", k, d),
-        help_line("  Ctrl+N", "Autocomplete", k, d),
-        Line::from(""),
-        Line::from(Span::styled("  Macros", h)),
-        help_line("  Qa", "Start recording @a", k, d),
-        help_line("  Qa (again)", "Stop recording", k, d),
-        help_line("  @a", "Replay macro @a", k, d),
-        help_line("  @@", "Replay last macro", k, d),
-        Line::from(""),
-        Line::from(Span::styled("  Other", h)),
-        help_line("  gd", "Go to definition (LSP)", k, d),
-        help_line("  K", "Hover info (LSP)", k, d),
-        help_line("  gx", "Open URL under cursor", k, d),
-        help_line("  gf", "Open file under cursor", k, d),
-        help_line("  Ctrl+O / Ctrl+I", "Jump back / forward", k, d),
-        help_line("  ma / 'a / `a", "Set / jump to mark", k, d),
-        help_line("  :marks", "List all marks", k, d),
-        help_line("  :registers", "List all registers", k, d),
-        help_line("  :!cmd", "Run shell command", k, d),
-        help_line("  :%s/old/new", "Replace all (regex)", k, d),
-        help_line("  :mksession", "Save session", k, d),
-        help_line("  :set rnu/nonu", "Line number mode", k, d),
-        help_line("  :set wrap/nowrap", "Toggle word wrap", k, d),
-        help_line("  :set et/noet", "Expand tab on/off", k, d),
-        help_line("  :set ts=N", "Set tab width", k, d),
-        help_line("  Ctrl+L", "Redraw screen", k, d),
-        Line::from(""),
-        Line::from(Span::styled("  ↑/↓ scroll | Esc close", dim)),
-    ];
+    let all_lines: Vec<Line> = help_entries().iter().map(|entry| match entry {
+        HelpEntry::Section(title) => Line::from(Span::styled(format!("  {}", title), h)),
+        HelpEntry::Shortcut { key, desc } => {
+            let key_str = format!("  {}", key);
+            let padding = 20usize.saturating_sub(key_str.len());
+            Line::from(vec![
+                Span::styled(key_str, k),
+                Span::raw(" ".repeat(padding)),
+                Span::styled(desc.to_string(), d),
+            ])
+        }
+        HelpEntry::Blank => Line::from(""),
+        HelpEntry::Footer(text) => Line::from(Span::styled(format!("  {}", text), dim)),
+    }).collect();
 
     let visible_height = popup_height.saturating_sub(2) as usize;
     let max_scroll = all_lines.len().saturating_sub(visible_height);
@@ -204,15 +104,6 @@ pub(super) fn render_plugin_popup(f: &mut ratatui::Frame, area: Rect, title: &st
     );
 
     f.render_widget(popup, popup_area);
-}
-
-fn help_line<'a>(key: &'a str, desc: &'a str, key_style: Style, desc_style: Style) -> Line<'a> {
-    let padding = 20usize.saturating_sub(key.len());
-    Line::from(vec![
-        Span::styled(key, key_style),
-        Span::raw(" ".repeat(padding)),
-        Span::styled(desc, desc_style),
-    ])
 }
 
 /// Render buffer list popup.
@@ -585,6 +476,126 @@ pub(super) fn render_workspace_list(f: &mut ratatui::Frame, area: Rect, state: &
         Block::default()
             .borders(Borders::ALL)
             .title(" Workspaces ")
+            .border_style(Style::default().fg(Color::Cyan))
+            .style(Style::default().bg(Color::Black)),
+    );
+    f.render_widget(popup, popup_area);
+}
+
+/// Render the symbol list popup (Ctrl+T / :symbols).
+pub(super) fn render_symbol_list(f: &mut ratatui::Frame, area: Rect, state: &EditorState) {
+    let popup_width = 50u16.min(area.width.saturating_sub(4));
+    let popup_height = (area.height * 3 / 4).max(10).min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let sl = &state.symbol_list;
+    let visible_height = popup_height.saturating_sub(4) as usize;
+    let scroll = if sl.selected >= visible_height { sl.selected - visible_height + 1 } else { 0 };
+
+    let mut lines = Vec::new();
+    // Query line
+    lines.push(Line::from(vec![
+        Span::styled("> ", Style::default().fg(Color::Yellow)),
+        Span::raw(&sl.query),
+    ]));
+
+    for (i, &idx) in sl.filtered.iter().enumerate().skip(scroll).take(visible_height) {
+        let sym = &sl.symbols[idx];
+        let is_selected = i == sl.selected;
+        let style = if is_selected {
+            Style::default().bg(Color::DarkGray).fg(Color::White)
+        } else {
+            Style::default()
+        };
+        let kind_style = if is_selected {
+            Style::default().bg(Color::DarkGray).fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:>6} ", sym.kind.label()), kind_style),
+            Span::styled(format!("{:<30} :{}", sym.name, sym.line + 1), style),
+        ]));
+    }
+
+    let title = format!(" Symbols ({}) ", sl.filtered.len());
+    let popup = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(Style::default().fg(Color::Cyan))
+            .style(Style::default().bg(Color::Black)),
+    );
+    f.render_widget(popup, popup_area);
+}
+
+/// Render a floating window.
+pub(super) fn render_floating_window(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    fw: &novim_core::editor::FloatingWindow,
+) {
+    let popup_width = fw.width.min(area.width.saturating_sub(4));
+    let popup_height = fw.height.min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let visible_height = popup_height.saturating_sub(2) as usize;
+    let lines: Vec<Line> = fw.lines.iter()
+        .skip(fw.scroll)
+        .take(visible_height)
+        .map(|l| Line::from(Span::raw(l.as_str())))
+        .collect();
+
+    let popup = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} ", fw.title))
+            .border_style(Style::default().fg(Color::Cyan))
+            .style(Style::default().bg(Color::Black)),
+    );
+    f.render_widget(popup, popup_area);
+}
+
+/// Render the command history window (q:).
+pub(super) fn render_command_window(f: &mut ratatui::Frame, area: Rect, state: &EditorState) {
+    let popup_width = 50u16.min(area.width.saturating_sub(4));
+    let popup_height = (area.height / 2).max(10).min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let visible_height = popup_height.saturating_sub(2) as usize;
+    let selected = state.command_window.selected;
+    let scroll = if selected >= visible_height { selected - visible_height + 1 } else { 0 };
+
+    let lines: Vec<Line> = state.command_history.iter().enumerate()
+        .skip(scroll)
+        .take(visible_height)
+        .map(|(i, cmd)| {
+            let style = if i == selected {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Line::from(Span::styled(format!(" :{}", cmd), style))
+        })
+        .collect();
+
+    let title = format!(" Command History ({}) ", state.command_history.len());
+    let popup = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
             .border_style(Style::default().fg(Color::Cyan))
             .style(Style::default().bg(Color::Black)),
     );

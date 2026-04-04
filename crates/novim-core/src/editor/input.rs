@@ -3,7 +3,6 @@
 use crossterm::event::{MouseEvent, MouseEventKind, MouseButton};
 
 use crate::input::{parse_ex_command, EditorCommand};
-use crate::lsp::LspClient;
 use crate::pane::PaneContent;
 use novim_types::{EditorMode, Selection};
 
@@ -35,6 +34,29 @@ impl EditorState {
                         self.tabs[idx].panes.try_set_focus(*pane_id);
 
                         let is_terminal = self.tabs[idx].panes.focused_pane().content.as_buffer_like().is_terminal();
+                        let show_minimap = self.config.editor.minimap && !is_terminal && rect.width > 30;
+                        let minimap_w = if show_minimap { self.config.editor.minimap_width as u16 } else { 0 };
+                        let pane_right = rect.x + rect.width.saturating_sub(minimap_w);
+
+                        // Check if click is in minimap area
+                        if show_minimap && click_x >= pane_right {
+                            if let Some(pane) = self.tabs[idx].panes.get_pane_mut(*pane_id) {
+                                let total_lines = pane.content.as_buffer_like().len_lines().max(1);
+                                let height = rect.height as usize;
+                                let local_y = click_y.saturating_sub(rect.y) as usize;
+                                let scale = (total_lines as f64 / height as f64).max(1.0);
+                                let target_line = (local_y as f64 * scale) as usize;
+                                let target_line = target_line.min(total_lines.saturating_sub(1));
+                                pane.content.as_buffer_like_mut().set_cursor_pos(
+                                    novim_types::Position::new(target_line, 0),
+                                );
+                                // Center viewport on target
+                                let half = height / 2;
+                                pane.viewport_offset = target_line.saturating_sub(half);
+                            }
+                            break;
+                        }
+
                         let border_offset = 1u16;
                         let col_offset = if is_terminal { 1 } else { 6 };
 
@@ -44,6 +66,19 @@ impl EditorState {
                         if let Some(pane) = self.tabs[idx].panes.get_pane_mut(*pane_id) {
                             let line = pane.viewport_offset + local_y as usize;
                             let col = local_x as usize;
+
+                            // Check for OSC 8 hyperlink on terminal cells
+                            if is_terminal {
+                                if let Some(cells) = pane.content.as_buffer_like().get_styled_cells(local_y as usize) {
+                                    if let Some(cell) = cells.get(col) {
+                                        if let Some(ref url) = cell.hyperlink {
+                                            crate::url::open_url(url);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
                             pane.content.as_buffer_like_mut().set_cursor_pos(
                                 novim_types::Position::new(line, col),
                             );
@@ -118,59 +153,6 @@ impl EditorState {
     }
 
     /// Run a callback with the LSP client for the focused buffer's language.
-    pub(super) fn with_lsp_client<F>(&mut self, f: F) -> Option<String>
-    where
-        F: FnOnce(&mut LspClient, &str, novim_types::Position) -> Option<String>,
-    {
-        let idx = self.active_tab;
-        let uri = self.tabs[idx].get_focused_uri()?;
-        let cursor = self.tabs[idx].panes.focused_pane().content.as_buffer_like().cursor();
-        let display = self.tabs[idx].panes.focused_pane().content.as_buffer_like().display_name();
-        let ext = display.rsplit('.').next().unwrap_or("").to_string();
-        let server = self.tabs[idx].lsp_registry.resolve(&ext)?;
-        let lang_id = server.language_id.clone();
-        let client = self.tabs[idx].lsp_clients.get_mut(&lang_id)?;
-        f(client, &uri, cursor)
-    }
-
-    /// Poll all LSP clients for events in the active workspace.
-    pub fn poll_active_lsp(&mut self) {
-        let idx = self.active_tab;
-        let result = self.tabs[idx].poll_lsp_events();
-
-        for (uri, diags) in result.diagnostics {
-            self.tabs[idx].diagnostics.insert(uri, diags);
-        }
-        if let Some(goto) = result.goto {
-            self.tabs[idx].pending_goto = Some(goto);
-        }
-        if let Some(hover) = result.hover {
-            self.hover_text = Some(hover);
-        }
-        if let Some(items) = result.completions {
-            self.status_message = Some(format!("{} completions received", items.len()));
-            self.completion.items = items;
-            self.completion.selected = 0;
-            self.completion.visible = true;
-        }
-        if let Some(msg) = result.status_messages.last() {
-            self.tabs[idx].lsp_status = Some(msg.clone());
-        }
-        for msg in &result.status_messages {
-            self.status_message = Some(msg.clone());
-        }
-
-        // Handle pending goto-definition
-        if let Some((uri, line, col)) = self.tabs[idx].pending_goto.take() {
-            let path = uri.strip_prefix("file://").unwrap_or(&uri);
-            let _ = self.handle_edit_file(path);
-            let idx = self.active_tab;
-            self.tabs[idx].panes.focused_pane_mut().content.as_buffer_like_mut()
-                .set_cursor_pos(novim_types::Position::new(line as usize, col as usize));
-            self.status_message = Some("Jumped to definition".to_string());
-        }
-    }
-
     /// Navigate the jump list forward or backward.
     pub(super) fn navigate_jump_list(&mut self, forward: bool) -> Result<ExecOutcome, crate::error::NovimError> {
         let can_move = if forward {
@@ -237,7 +219,7 @@ impl EditorState {
     }
 
     /// Build a read-only snapshot of the focused buffer for plugin dispatch.
-    pub(super) fn make_buffer_snapshot(&self) -> crate::plugin::BufferSnapshot {
+    pub fn make_buffer_snapshot(&self) -> crate::plugin::BufferSnapshot {
         let buf = self.focused_buf();
         let cursor = buf.cursor();
         // Get full file path from the Buffer (not display_name which is just the filename)
@@ -252,12 +234,21 @@ impl EditorState {
             let (start, end) = s.ordered();
             (start.line, start.column, end.line, end.column)
         });
+        // Extract text and version from Buffer (uses cached_text for O(1) when clean)
+        let (text, version) = {
+            let pane = self.tabs[self.active_tab].panes.focused_pane();
+            match &pane.content {
+                crate::pane::PaneContent::Editor(b) => (Some(b.full_text()), Some(b.version())),
+                _ => (None, None),
+            }
+        };
+        let line_count = buf.len_lines();
         crate::plugin::BufferSnapshot {
-            lines: (0..buf.len_lines()).filter_map(|i| buf.get_line(i)).collect(),
-            line_count: buf.len_lines(),
+            lines: Vec::new(), // Lazy: populated on-demand by Lua bridge via get_lines()
+            line_count,
             cursor_line: cursor.line,
             cursor_col: cursor.column,
-            path: full_path.or_else(|| Some(buf.display_name())),
+            path: full_path,
             is_dirty: buf.is_dirty(),
             mode: self.mode.display_name().to_string(),
             selection: sel,
@@ -268,6 +259,8 @@ impl EditorState {
             word_wrap: self.config.editor.word_wrap,
             line_numbers: self.config.editor.line_numbers.clone(),
             pane_count: self.tabs[self.active_tab].panes.pane_count(),
+            text,
+            version,
         }
     }
 
@@ -290,6 +283,7 @@ impl EditorState {
             | EditorCommand::InsertNewline
             | EditorCommand::DeleteCharBefore
             | EditorCommand::Paste
+            | EditorCommand::PasteBefore
             | EditorCommand::DeleteLines(_)
             | EditorCommand::DeleteMotion(..)
             | EditorCommand::ChangeMotion(..)
@@ -302,7 +296,21 @@ impl EditorState {
             | EditorCommand::DeleteSelection
             | EditorCommand::DeleteTextObject(..)
             | EditorCommand::ChangeTextObject(..)
-            | EditorCommand::CompletionAccept => {
+            | EditorCommand::CompletionAccept
+            | EditorCommand::ReplaceChar(_)
+            | EditorCommand::DeleteCharForward
+            | EditorCommand::OpenLineBelow
+            | EditorCommand::OpenLineAbove
+            | EditorCommand::ChangeToEnd
+            | EditorCommand::DeleteToEnd
+            | EditorCommand::SubstituteLine
+            | EditorCommand::JoinLines(_)
+            | EditorCommand::Indent(_)
+            | EditorCommand::Dedent(_)
+            | EditorCommand::ToggleCase
+            | EditorCommand::ReplaceInsertChar(_)
+            | EditorCommand::SortLines
+            | EditorCommand::AutoIndent => {
                 vec![EditorEvent::TextChanged { path: path() }]
             }
             EditorCommand::CommandExecute => {
@@ -376,6 +384,14 @@ impl EditorState {
                         title, lines, scroll: 0, selected: 0, width, height, on_select,
                     });
                 }
+                PluginAction::OpenFloat { title, lines, width, height } => {
+                    self.floating_windows.push(super::FloatingWindow {
+                        title, lines, width, height, scroll: 0, selected: 0,
+                    });
+                }
+                PluginAction::CloseFloat => {
+                    self.floating_windows.pop();
+                }
                 PluginAction::SetGutterSigns(signs) => {
                     let idx = self.active_tab;
                     let pane = self.tabs[idx].panes.focused_pane_mut();
@@ -388,6 +404,32 @@ impl EditorState {
                     let event = crate::plugin::EditorEvent::Custom { name, data };
                     let actions = self.plugins.dispatch(&event, &snapshot);
                     self.run_plugin_actions(actions, screen_area);
+                }
+                // LSP plugin actions
+                PluginAction::SetDiagnostics { uri, diagnostics } => {
+                    let idx = self.active_tab;
+                    self.tabs[idx].diagnostics.insert(uri, diagnostics);
+                }
+                PluginAction::ShowCompletions { items } => {
+                    if !items.is_empty() {
+                        self.completion.items = items;
+                        self.completion.selected = 0;
+                        self.completion.visible = true;
+                    }
+                }
+                PluginAction::ShowHoverText { text } => {
+                    self.hover_text = Some(text);
+                }
+                PluginAction::GotoLocation { file, line, col } => {
+                    self.push_jump();
+                    let _ = self.handle_edit_file(&file);
+                    self.focused_buf_mut().set_cursor_pos(
+                        novim_types::Position::new(line as usize, col as usize),
+                    );
+                }
+                PluginAction::SetLspStatus { lang: _, message } => {
+                    let idx = self.active_tab;
+                    self.tabs[idx].lsp_status = message;
                 }
             }
         }

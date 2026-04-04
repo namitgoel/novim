@@ -8,20 +8,9 @@ use novim_core::pane::{Pane, PaneContent};
 
 use super::theme::*;
 
-// ── Syntax highlighting ───────────────────────────────────────────────────────
+use novim_core::text_utils::snap_to_char_boundary;
 
-/// Snap a byte offset to the nearest char boundary (rounding down).
-pub(super) fn snap_to_char_boundary(s: &str, byte_idx: usize) -> usize {
-    let idx = byte_idx.min(s.len());
-    if s.is_char_boundary(idx) {
-        return idx;
-    }
-    let mut i = idx;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
+// ── Syntax highlighting ───────────────────────────────────────────────────────
 
 pub(super) fn apply_syntax_highlights(
     content: &str,
@@ -61,22 +50,8 @@ pub(super) fn apply_syntax_highlights(
 }
 
 pub(super) fn highlight_group_color(group: HighlightGroup, theme: &SyntaxTheme) -> Color {
-    let color_str = match group {
-        HighlightGroup::Keyword => &theme.keyword,
-        HighlightGroup::Function | HighlightGroup::FunctionBuiltin => &theme.function,
-        HighlightGroup::Type | HighlightGroup::TypeBuiltin => &theme.r#type,
-        HighlightGroup::Variable | HighlightGroup::VariableBuiltin => &theme.variable,
-        HighlightGroup::Constant | HighlightGroup::ConstantBuiltin => &theme.constant,
-        HighlightGroup::String => &theme.string,
-        HighlightGroup::Number => &theme.number,
-        HighlightGroup::Comment => &theme.comment,
-        HighlightGroup::Operator => &theme.operator,
-        HighlightGroup::Punctuation | HighlightGroup::PunctuationBracket | HighlightGroup::PunctuationDelimiter => &theme.punctuation,
-        HighlightGroup::Property => &theme.property,
-        HighlightGroup::Attribute => &theme.attribute,
-        HighlightGroup::Tag => &theme.property,
-        HighlightGroup::Escape => &theme.constant,
-        HighlightGroup::None => return FG,
+    let Some(color_str) = group.theme_color(theme) else {
+        return FG;
     };
     config_color_to_glyphon(config::parse_color(color_str))
 }
@@ -275,6 +250,7 @@ pub(super) fn cell_color_to_glyphon(c: novim_core::emulator::grid::CellColor) ->
         CellColor::BrightMagenta => Color::rgb(220, 160, 240),
         CellColor::BrightCyan => Color::rgb(130, 210, 220),
         CellColor::BrightWhite => Color::rgb(255, 255, 255),
+        CellColor::Rgb(r, g, b) => Color::rgb(r, g, b),
     }
 }
 
@@ -299,11 +275,4 @@ pub(super) fn get_diag_marker(ws: &novim_core::editor::Workspace, pane: &Pane, l
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
-pub(super) fn truncate_str(s: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_chars {
-        s.to_string()
-    } else {
-        chars[..max_chars].iter().collect()
-    }
-}
+pub(super) use novim_core::text_utils::truncate_str;

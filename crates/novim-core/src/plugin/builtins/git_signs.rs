@@ -80,6 +80,7 @@ impl Plugin for GitSignsPlugin {
     fn id(&self) -> &str { "git_signs" }
     fn name(&self) -> &str { "Git Signs" }
     fn is_builtin(&self) -> bool { true }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn init(&mut self, _ctx: &mut PluginContext) {}
 

@@ -49,6 +49,11 @@ pub struct Pane {
     pub viewport_offset: usize,
     /// When > 0, the terminal pane is in copy mode, showing scrollback at this offset.
     pub copy_mode_offset: usize,
+    /// Copy-mode cursor position: (row_offset_from_bottom, column).
+    /// row is relative to scrollback bottom (0 = current screen bottom).
+    pub copy_mode_cursor: (usize, usize),
+    /// Copy-mode selection anchor (set when 'v' is pressed). Same coordinate system.
+    pub copy_mode_selection: Option<(usize, usize)>,
 }
 
 impl Pane {
@@ -58,6 +63,8 @@ impl Pane {
             content: PaneContent::Editor(buffer),
             viewport_offset: 0,
             copy_mode_offset: 0,
+            copy_mode_cursor: (0, 0),
+            copy_mode_selection: None,
         }
     }
 
@@ -67,6 +74,8 @@ impl Pane {
             content: PaneContent::Terminal(term),
             viewport_offset: 0,
             copy_mode_offset: 0,
+            copy_mode_cursor: (0, 0),
+            copy_mode_selection: None,
         }
     }
 }
@@ -207,6 +216,8 @@ impl PaneNode {
                     std::mem::swap(&mut (*a).content, &mut (*b).content);
                     std::mem::swap(&mut (*a).viewport_offset, &mut (*b).viewport_offset);
                     std::mem::swap(&mut (*a).copy_mode_offset, &mut (*b).copy_mode_offset);
+                    std::mem::swap(&mut (*a).copy_mode_cursor, &mut (*b).copy_mode_cursor);
+                    std::mem::swap(&mut (*a).copy_mode_selection, &mut (*b).copy_mode_selection);
                 }
             }
         }

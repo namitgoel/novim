@@ -56,6 +56,34 @@ pub enum HighlightGroup {
 }
 
 impl HighlightGroup {
+    /// Return the color string from the syntax theme for this highlight group.
+    /// Returns `None` for `HighlightGroup::None` (use default foreground).
+    pub fn theme_color<'a>(&self, theme: &'a crate::config::SyntaxTheme) -> Option<&'a str> {
+        let s = match self {
+            Self::Keyword => &theme.keyword,
+            Self::Function | Self::FunctionBuiltin => &theme.function,
+            Self::Type | Self::TypeBuiltin => &theme.r#type,
+            Self::Variable | Self::VariableBuiltin => &theme.variable,
+            Self::Constant | Self::ConstantBuiltin => &theme.constant,
+            Self::String => &theme.string,
+            Self::Number => &theme.number,
+            Self::Comment => &theme.comment,
+            Self::Operator => &theme.operator,
+            Self::Punctuation | Self::PunctuationBracket | Self::PunctuationDelimiter => &theme.punctuation,
+            Self::Property => &theme.property,
+            Self::Attribute => &theme.attribute,
+            Self::Tag => &theme.property,
+            Self::Escape => &theme.constant,
+            Self::None => return None,
+        };
+        Some(s)
+    }
+
+    /// Whether this group should be rendered bold.
+    pub fn is_bold(&self) -> bool {
+        matches!(self, Self::Keyword)
+    }
+
     fn from_index(idx: usize) -> Self {
         match idx {
             0 => Self::Keyword,
@@ -212,6 +240,142 @@ impl SyntaxHighlighter {
 
 fn default_spans(source: &str) -> Vec<Vec<HighlightSpan>> {
     source.lines().map(|_| Vec::new()).collect()
+}
+
+/// A symbol extracted from the AST (function, struct, class, etc.).
+#[derive(Debug, Clone)]
+pub struct SymbolInfo {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub line: usize,
+    /// End line of the symbol's scope (for containment/breadcrumb checks).
+    pub end_line: usize,
+    /// Nesting depth (0 = top-level, 1 = inside impl/class, etc.).
+    pub depth: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolKind {
+    Function,
+    Method,
+    Struct,
+    Enum,
+    Class,
+    Interface,
+    Constant,
+    Module,
+}
+
+impl SymbolKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Function => "fn",
+            Self::Method => "method",
+            Self::Struct => "struct",
+            Self::Enum => "enum",
+            Self::Class => "class",
+            Self::Interface => "interface",
+            Self::Constant => "const",
+            Self::Module => "mod",
+        }
+    }
+}
+
+/// Extract symbols (functions, structs, classes) from source code.
+pub fn extract_symbols(source: &str, lang: Language) -> Vec<SymbolInfo> {
+    let Some(ts_lang) = ts_language(lang) else { return Vec::new() };
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&ts_lang).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else { return Vec::new() };
+
+    let mut symbols = Vec::new();
+    let node_kinds = symbol_node_kinds(lang);
+    walk_for_symbols(&tree.root_node(), source, &node_kinds, lang, &mut symbols, 0);
+    symbols
+}
+
+/// Find the breadcrumb trail for a given cursor line.
+/// Returns the chain of containing symbols from outermost to innermost.
+pub fn breadcrumb_at(symbols: &[SymbolInfo], cursor_line: usize) -> Vec<&SymbolInfo> {
+    let mut trail: Vec<&SymbolInfo> = symbols.iter()
+        .filter(|s| cursor_line >= s.line && cursor_line <= s.end_line)
+        .collect();
+    // Sort by depth (outermost first), then by line (earlier first)
+    trail.sort_by_key(|s| (s.depth, s.line));
+    trail
+}
+
+fn ts_language(lang: Language) -> Option<tree_sitter::Language> {
+    match lang {
+        Language::Rust => Some(tree_sitter_rust::LANGUAGE.into()),
+        Language::JavaScript | Language::TypeScript => Some(tree_sitter_javascript::LANGUAGE.into()),
+        Language::Python => Some(tree_sitter_python::LANGUAGE.into()),
+        Language::Json | Language::Toml | Language::Markdown => None, // no meaningful symbols
+    }
+}
+
+/// Map of AST node kinds → SymbolKind for each language.
+fn symbol_node_kinds(lang: Language) -> Vec<(&'static str, &'static str, SymbolKind)> {
+    // (node_kind, name_field, symbol_kind)
+    match lang {
+        Language::Rust => vec![
+            ("function_item", "name", SymbolKind::Function),
+            ("struct_item", "name", SymbolKind::Struct),
+            ("enum_item", "name", SymbolKind::Enum),
+            ("impl_item", "type", SymbolKind::Struct),
+            ("mod_item", "name", SymbolKind::Module),
+            ("const_item", "name", SymbolKind::Constant),
+            ("static_item", "name", SymbolKind::Constant),
+            ("trait_item", "name", SymbolKind::Interface),
+        ],
+        Language::JavaScript | Language::TypeScript => vec![
+            ("function_declaration", "name", SymbolKind::Function),
+            ("method_definition", "name", SymbolKind::Method),
+            ("class_declaration", "name", SymbolKind::Class),
+            ("variable_declarator", "name", SymbolKind::Constant),
+        ],
+        Language::Python => vec![
+            ("function_definition", "name", SymbolKind::Function),
+            ("class_definition", "name", SymbolKind::Class),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn walk_for_symbols(
+    node: &tree_sitter::Node,
+    source: &str,
+    kinds: &[(&str, &str, SymbolKind)],
+    lang: Language,
+    out: &mut Vec<SymbolInfo>,
+    depth: usize,
+) {
+    let node_kind = node.kind();
+    let mut matched = false;
+    for (kind_str, name_field, sym_kind) in kinds {
+        if node_kind == *kind_str {
+            if let Some(name_node) = node.child_by_field_name(name_field) {
+                let name = &source[name_node.start_byte()..name_node.end_byte()];
+                out.push(SymbolInfo {
+                    name: name.to_string(),
+                    kind: *sym_kind,
+                    line: node.start_position().row,
+                    end_line: node.end_position().row,
+                    depth,
+                });
+                matched = true;
+            }
+            break;
+        }
+    }
+    // Recurse into children (increase depth if this node was a symbol)
+    let child_depth = if matched { depth + 1 } else { depth };
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_for_symbols(&child, source, kinds, lang, out, child_depth);
+    }
 }
 
 fn make_config(lang: Language) -> Option<HighlightConfiguration> {

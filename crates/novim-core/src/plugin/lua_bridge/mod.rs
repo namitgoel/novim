@@ -114,6 +114,7 @@ impl LuaPlugin {
 impl Plugin for LuaPlugin {
     fn id(&self) -> &str { &self.id }
     fn name(&self) -> &str { &self.name }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn init(&mut self, _ctx: &mut PluginContext) {
         if let Err(e) = self.setup_api_and_run() {

@@ -17,10 +17,11 @@ use ratatui::{
 
 use super::EditorState;
 
-use pane::{render_single_pane, render_explorer};
+use pane::{render_single_pane, render_explorer, render_outline_sidebar};
 use popups::{
     render_help_popup, render_plugin_popup, render_buffer_list, render_completion_popup,
     render_file_finder, render_hover_popup, render_workspace_list,
+    render_symbol_list, render_floating_window, render_command_window,
 };
 use styling::config_color_to_ratatui;
 use util::TAB_COLORS;
@@ -72,20 +73,58 @@ pub fn render(f: &mut ratatui::Frame, state: &mut EditorState) {
     let status_chunk = chunks[chunk_idx];
     chunk_idx += 1;
 
-    // Split horizontally if explorer is open
-    let ws = &state.tabs[state.active_tab];
-    let pane_area = if ws.explorer.is_some() {
-        let hsplit = Layout::default()
-            .direction(Direction::Horizontal)
+    // Breadcrumb bar (shown when outline is visible)
+    let (_breadcrumb_area, content_area) = if state.outline.visible && !state.outline.breadcrumb.is_empty() {
+        let vsplit = Layout::default()
+            .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(30), // explorer sidebar
+                Constraint::Length(1),  // breadcrumb
                 Constraint::Min(1),     // panes
             ])
             .split(main_chunk);
-        render_explorer(f, hsplit[0], state);
-        hsplit[1]
+        // Render breadcrumb
+        let crumb = format!(" {} ", state.outline.breadcrumb);
+        let widget = Paragraph::new(Line::from(vec![
+            Span::styled(crumb, Style::default().fg(Color::Indexed(252)).bg(Color::Indexed(236))),
+        ])).style(Style::default().bg(Color::Indexed(236)));
+        f.render_widget(widget, vsplit[0]);
+        (Some(vsplit[0]), vsplit[1])
     } else {
-        main_chunk
+        (None, main_chunk)
+    };
+
+    // Split horizontally if explorer or outline sidebar is open
+    let ws = &state.tabs[state.active_tab];
+    let has_explorer = ws.explorer.is_some();
+    let has_outline = state.outline.visible && !state.outline.symbols.is_empty();
+
+    let pane_area = if has_explorer || has_outline {
+        let mut h_constraints = Vec::new();
+        if has_explorer {
+            h_constraints.push(Constraint::Length(30));
+        }
+        h_constraints.push(Constraint::Min(1)); // panes
+        if has_outline {
+            h_constraints.push(Constraint::Length(28)); // outline sidebar
+        }
+        let hsplit = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(h_constraints)
+            .split(content_area);
+
+        let mut idx = 0;
+        if has_explorer {
+            render_explorer(f, hsplit[idx], state);
+            idx += 1;
+        }
+        let pane_rect = hsplit[idx];
+        idx += 1;
+        if has_outline {
+            render_outline_sidebar(f, hsplit[idx], state);
+        }
+        pane_rect
+    } else {
+        content_area
     };
 
     render_panes(f, pane_area, state, false);
@@ -128,6 +167,21 @@ pub fn render(f: &mut ratatui::Frame, state: &mut EditorState) {
     if let Some(popup) = &state.plugin_popup {
         render_plugin_popup(f, size, &popup.title, &popup.lines, popup.scroll, popup.selected, popup.on_select.is_some(), popup.width, popup.height);
     }
+
+    // Symbol list popup
+    if state.symbol_list.visible {
+        render_symbol_list(f, size, state);
+    }
+
+    // Floating windows (render last, on top of everything)
+    for fw in &state.floating_windows {
+        render_floating_window(f, size, fw);
+    }
+
+    // Command window
+    if state.command_window.visible {
+        render_command_window(f, size, state);
+    }
 }
 
 fn render_tab_bar(f: &mut ratatui::Frame, area: Rect, state: &EditorState) {
@@ -160,6 +214,8 @@ fn render_panes(f: &mut ratatui::Frame, area: Rect, state: &mut EditorState, bor
     let tab_width = state.config.editor.tab_width;
     let word_wrap = state.config.editor.word_wrap;
     let search_pattern = state.search.pattern.as_deref();
+    let show_minimap = state.config.editor.minimap;
+    let minimap_width = state.config.editor.minimap_width;
     let core_area = novim_types::Rect::new(area.x, area.y, area.width, area.height);
     let layouts = state.tabs[idx].panes.layout(core_area);
 
@@ -177,85 +233,28 @@ fn render_panes(f: &mut ratatui::Frame, area: Rect, state: &mut EditorState, bor
         let diags = diag_uri.and_then(|uri| ws.diagnostics.get(&uri));
         if let Some(pane) = ws.panes.get_pane_mut(*pane_id) {
             let border_color = if is_focused { focused_color } else { unfocused_color };
-            render_single_pane(f, ratatui_rect, pane, is_focused, ln_mode, border_color, diags, search_pattern, syntax_theme, tab_width, word_wrap, borderless);
+            let is_editor = !pane.content.as_buffer_like().is_terminal();
+            let minimap_w = if show_minimap && is_editor && ratatui_rect.width > 30 {
+                minimap_width as u16
+            } else {
+                0
+            };
+            let pane_rect = Rect::new(ratatui_rect.x, ratatui_rect.y, ratatui_rect.width.saturating_sub(minimap_w), ratatui_rect.height);
+            render_single_pane(f, pane_rect, pane, is_focused, ln_mode, border_color, diags, search_pattern, syntax_theme, tab_width, word_wrap, borderless);
+            if minimap_w > 0 {
+                let minimap_rect = Rect::new(pane_rect.x + pane_rect.width, ratatui_rect.y, minimap_w, ratatui_rect.height);
+                pane::render_minimap(f, minimap_rect, pane);
+            }
         }
     }
 }
 
 fn render_status_bar(f: &mut ratatui::Frame, area: Rect, state: &mut EditorState) {
-    let idx = state.active_tab;
-    let pane_count = state.tabs[idx].panes.pane_count();
+    let info = state.status_bar_info();
+    let sb_config = &state.config.status_bar;
 
-    // Count diagnostics for the focused file
-    let diag_info = {
-        let pane = state.tabs[idx].panes.focused_pane();
-        let uri = match &pane.content {
-            novim_core::pane::PaneContent::Editor(buf) => buf.file_uri(),
-            _ => None,
-        };
-        if let Some(diags) = uri.and_then(|u| state.tabs[idx].diagnostics.get(&u)) {
-            let errors = diags.iter().filter(|d| d.severity == novim_core::lsp::DiagnosticSeverity::Error).count();
-            let warnings = diags.iter().filter(|d| d.severity == novim_core::lsp::DiagnosticSeverity::Warning).count();
-            if errors > 0 || warnings > 0 {
-                format!(" {}E {}W", errors, warnings)
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        }
-    };
-
-    let pane = state.tabs[idx].panes.focused_pane_mut();
-    let cursor = pane.content.as_buffer_like().cursor();
-    let total = pane.content.as_buffer_like().len_lines();
-    let is_terminal = pane.content.as_buffer_like().is_terminal();
-
-    // LSP status indicator with progress
-    let lsp_status = if !state.tabs[idx].lsp_clients.is_empty() {
-        let langs: Vec<&str> = state.tabs[idx].lsp_clients.keys().map(|s| s.as_str()).collect();
-        if let Some(status) = &state.tabs[idx].lsp_status {
-            format!(" LSP:{}[{}]", langs.join(","), status)
-        } else {
-            format!(" LSP:{}", langs.join(","))
-        }
-    } else {
-        String::new()
-    };
-
-    let branch = state.git_branch.as_deref().map(|b| format!(" {}", b)).unwrap_or_default();
-
-    let right = format!(
-        "{}{} | {}:{} | {}/{} ",
-        lsp_status,
-        branch,
-        cursor.line + 1,
-        cursor.column + 1,
-        cursor.line + 1,
-        total,
-    );
-
-    let pane_info = if pane_count > 1 {
-        format!(" [pane {}/{}]", state.tabs[idx].panes.focused_id() + 1, pane_count)
-    } else {
-        String::new()
-    };
-
-    let mode_name = if let Some(reg) = state.macros.recording {
-        &format!("REC @{}", reg)
-    } else if state.input_state == novim_core::input::InputState::WaitingPaneCommand {
-        "CTRL+W..."
-    } else if is_terminal {
-        "TERMINAL"
-    } else {
-        state.mode.display_name()
-    };
-
-    let left = if let Some(msg) = &state.status_message {
-        format!(" {} | {}{}{}", mode_name, msg, diag_info, pane_info)
-    } else {
-        format!(" {}{}{}", mode_name, diag_info, pane_info)
-    };
+    let left = info.format_left(&sb_config.left);
+    let right = info.format_right(&sb_config.right);
 
     let padding = (area.width as usize).saturating_sub(left.len() + right.len());
     let text = format!("{}{:padding$}{}", left, "", right, padding = padding);

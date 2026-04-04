@@ -111,13 +111,75 @@ impl EditorState {
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::DisplayLineDown => {
-                // TODO: when word wrap is on, move by display line instead of buffer line
-                self.focused_buf_mut().move_cursor(novim_types::Direction::Down);
+                if self.config.editor.word_wrap {
+                    // Move by one display (wrapped) row, not buffer line
+                    let buf = self.focused_buf();
+                    let cursor = buf.cursor();
+                    let tab_width = self.config.editor.tab_width;
+                    if let Some(line) = buf.get_line(cursor.line) {
+                        let expanded = crate::text_utils::expand_tabs(&line, tab_width);
+                        let display_col = crate::text_utils::display_col(&line, cursor.column, tab_width);
+                        // Estimate text width (~80 cols minus gutter)
+                        let text_width = 76usize;
+                        let current_wrap_row = display_col / text_width;
+                        let total_wrap_rows = (expanded.chars().count().max(1) + text_width - 1) / text_width;
+                        if current_wrap_row + 1 < total_wrap_rows {
+                            // Move within same buffer line to next wrap row
+                            let new_col = (current_wrap_row + 1) * text_width;
+                            let max_col = line.chars().count().saturating_sub(1);
+                            self.focused_buf_mut().set_cursor_pos(
+                                novim_types::Position::new(cursor.line, new_col.min(max_col)),
+                            );
+                        } else {
+                            // Move to next buffer line, col 0
+                            self.focused_buf_mut().move_cursor(novim_types::Direction::Down);
+                            let new_line = self.focused_buf().cursor().line;
+                            self.focused_buf_mut().set_cursor_pos(
+                                novim_types::Position::new(new_line, 0),
+                            );
+                        }
+                    } else {
+                        self.focused_buf_mut().move_cursor(novim_types::Direction::Down);
+                    }
+                } else {
+                    self.focused_buf_mut().move_cursor(novim_types::Direction::Down);
+                }
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::DisplayLineUp => {
-                // TODO: when word wrap is on, move by display line instead of buffer line
-                self.focused_buf_mut().move_cursor(novim_types::Direction::Up);
+                if self.config.editor.word_wrap {
+                    let buf = self.focused_buf();
+                    let cursor = buf.cursor();
+                    let tab_width = self.config.editor.tab_width;
+                    if let Some(line) = buf.get_line(cursor.line) {
+                        let display_col = crate::text_utils::display_col(&line, cursor.column, tab_width);
+                        let text_width = 76usize;
+                        let current_wrap_row = display_col / text_width;
+                        if current_wrap_row > 0 {
+                            // Move within same buffer line to previous wrap row
+                            let new_col = (current_wrap_row - 1) * text_width;
+                            self.focused_buf_mut().set_cursor_pos(
+                                novim_types::Position::new(cursor.line, new_col),
+                            );
+                        } else if cursor.line > 0 {
+                            // Move to end of previous buffer line's last wrap row
+                            self.focused_buf_mut().move_cursor(novim_types::Direction::Up);
+                            let prev_line = self.focused_buf().cursor().line;
+                            if let Some(prev) = self.focused_buf().get_line(prev_line) {
+                                let prev_len = prev.chars().count();
+                                let prev_last_wrap = (prev_len / text_width) * text_width;
+                                let col = prev_last_wrap.min(prev_len.saturating_sub(1));
+                                self.focused_buf_mut().set_cursor_pos(
+                                    novim_types::Position::new(prev_line, col),
+                                );
+                            }
+                        }
+                    } else {
+                        self.focused_buf_mut().move_cursor(novim_types::Direction::Up);
+                    }
+                } else {
+                    self.focused_buf_mut().move_cursor(novim_types::Direction::Up);
+                }
                 Ok(ExecOutcome::Continue)
             }
             _ => Ok(ExecOutcome::Continue),
@@ -184,6 +246,56 @@ impl EditorState {
                 self.mode = EditorMode::Normal;
                 Ok(ExecOutcome::Continue)
             }
+            EditorCommand::VisualIndent => {
+                if let Some(sel) = self.focused_buf().selection() {
+                    let (start, end) = sel.ordered();
+                    let tw = self.config.editor.tab_width;
+                    let expand = self.config.editor.expand_tab;
+                    let n = end.line - start.line + 1;
+                    // Move cursor to start of selection so indent_lines starts there
+                    self.focused_buf_mut().set_cursor_pos(start);
+                    self.focused_buf_mut().indent_lines(n, tw, expand);
+                    self.last_visual_selection = Some(sel);
+                }
+                self.focused_buf_mut().set_selection(None);
+                self.mode = EditorMode::Normal;
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::VisualDedent => {
+                if let Some(sel) = self.focused_buf().selection() {
+                    let (start, end) = sel.ordered();
+                    let tw = self.config.editor.tab_width;
+                    let n = end.line - start.line + 1;
+                    self.focused_buf_mut().set_cursor_pos(start);
+                    self.focused_buf_mut().dedent_lines(n, tw);
+                    self.last_visual_selection = Some(sel);
+                }
+                self.focused_buf_mut().set_selection(None);
+                self.mode = EditorMode::Normal;
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::VisualToggleCase | EditorCommand::VisualUpperCase | EditorCommand::VisualLowerCase => {
+                if let Some(text) = self.focused_buf().selected_text() {
+                    let transformed = match cmd {
+                        EditorCommand::VisualUpperCase => text.to_uppercase(),
+                        EditorCommand::VisualLowerCase => text.to_lowercase(),
+                        _ => text.chars().map(|c| {
+                            if c.is_uppercase() { c.to_lowercase().next().unwrap_or(c) }
+                            else { c.to_uppercase().next().unwrap_or(c) }
+                        }).collect(),
+                    };
+                    // Delete selection and insert transformed text
+                    self.focused_buf_mut().delete_selection();
+                    for c in transformed.chars() {
+                        self.focused_buf_mut().insert_char(c);
+                    }
+                    self.focused_buf_mut().break_undo_group();
+                    self.last_visual_selection = self.focused_buf().selection();
+                }
+                self.focused_buf_mut().set_selection(None);
+                self.mode = EditorMode::Normal;
+                Ok(ExecOutcome::Continue)
+            }
             _ => Ok(ExecOutcome::Continue),
         }
     }
@@ -240,7 +352,7 @@ impl EditorState {
             }
             EditorCommand::InsertChar(c) => {
                 self.focused_buf_mut().insert_char(c);
-                self.tabs[idx].notify_lsp_change();
+
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::ReplaceInsertChar(c) => {
@@ -248,25 +360,25 @@ impl EditorState {
                 if let crate::pane::PaneContent::Editor(buf) = &mut self.tabs[idx].panes.focused_pane_mut().content {
                     buf.replace_insert_char(c);
                 }
-                self.tabs[idx].notify_lsp_change();
+
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::InsertTab => {
                 let tw = self.config.editor.tab_width;
                 let et = self.config.editor.expand_tab;
                 self.focused_buf_mut().insert_tab(tw, et);
-                self.tabs[idx].notify_lsp_change();
+
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::DeleteCharBefore => {
                 self.focused_buf_mut().delete_char_before_cursor();
-                self.tabs[idx].notify_lsp_change();
+
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::InsertNewline => {
                 let ai = self.config.editor.auto_indent;
                 self.focused_buf_mut().insert_newline_with_indent(ai);
-                self.tabs[idx].notify_lsp_change();
+
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::Undo => {
@@ -288,14 +400,14 @@ impl EditorState {
                 let buf = self.focused_buf_mut();
                 buf.delete_motion(dir, n);
                 buf.break_undo_group();
-                self.tabs[idx].notify_lsp_change();
+
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::ChangeMotion(dir, n) => {
                 let buf = self.focused_buf_mut();
                 buf.delete_motion(dir, n);
                 buf.break_undo_group();
-                self.tabs[idx].notify_lsp_change();
+
                 self.mode = EditorMode::Insert;
                 Ok(ExecOutcome::Continue)
             }
@@ -303,7 +415,7 @@ impl EditorState {
                 if let Some(deleted) = self.focused_buf_mut().delete_lines(n) {
                     self.yank_to_register(&deleted);
                     self.focused_buf_mut().break_undo_group();
-                    self.tabs[idx].notify_lsp_change();
+    
                 }
                 Ok(ExecOutcome::Continue)
             }
@@ -311,8 +423,31 @@ impl EditorState {
                 let buf = self.focused_buf_mut();
                 buf.delete_lines(n);
                 buf.break_undo_group();
-                self.tabs[idx].notify_lsp_change();
+
                 self.mode = EditorMode::Insert;
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::YankTextObject(modifier, kind) => {
+                let range = {
+                    let buf = self.focused_buf_mut();
+                    use crate::input::{TextObjectModifier, TextObjectKind};
+                    match (modifier, kind) {
+                        (TextObjectModifier::Inner, TextObjectKind::Word) => buf.find_inner_word(),
+                        (TextObjectModifier::Around, TextObjectKind::Word) => buf.find_around_word(),
+                        (TextObjectModifier::Inner, TextObjectKind::Quote(q)) => buf.find_inner_quote(q),
+                        (TextObjectModifier::Around, TextObjectKind::Quote(q)) => buf.find_around_quote(q),
+                        (TextObjectModifier::Inner, TextObjectKind::Bracket(o, c)) => buf.find_inner_bracket(o, c),
+                        (TextObjectModifier::Around, TextObjectKind::Bracket(o, c)) => buf.find_around_bracket(o, c),
+                    }
+                };
+                if let Some((start, end)) = range {
+                    // Extract text from char index range without deleting
+                    let text = self.focused_buf_mut().get_text_range(start, end);
+                    if let Some(text) = text {
+                        self.yank_to_register(&text);
+                        self.status_message = Some("Yanked".to_string());
+                    }
+                }
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::DeleteTextObject(modifier, kind) | EditorCommand::ChangeTextObject(modifier, kind) => {
@@ -343,20 +478,20 @@ impl EditorState {
             EditorCommand::DeleteCharForward => {
                 self.focused_buf_mut().delete_char_forward();
                 self.focused_buf_mut().break_undo_group();
-                self.tabs[idx].notify_lsp_change();
+
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::ReplaceChar(c) => {
                 self.focused_buf_mut().replace_char(c);
                 self.focused_buf_mut().break_undo_group();
-                self.tabs[idx].notify_lsp_change();
+
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::OpenLineBelow => {
                 if let Some(pos) = self.focused_buf_mut().open_line_below() {
                     self.focused_buf_mut().set_cursor_pos(pos);
                     self.focused_buf_mut().break_undo_group();
-                    self.tabs[idx].notify_lsp_change();
+    
                 }
                 self.mode = EditorMode::Insert;
                 Ok(ExecOutcome::Continue)
@@ -365,7 +500,7 @@ impl EditorState {
                 if let Some(pos) = self.focused_buf_mut().open_line_above() {
                     self.focused_buf_mut().set_cursor_pos(pos);
                     self.focused_buf_mut().break_undo_group();
-                    self.tabs[idx].notify_lsp_change();
+    
                 }
                 self.mode = EditorMode::Insert;
                 Ok(ExecOutcome::Continue)
@@ -392,7 +527,7 @@ impl EditorState {
                 // Delete from cursor to end of line, enter insert
                 self.focused_buf_mut().delete_motion(novim_types::Direction::LineEnd, 1);
                 self.focused_buf_mut().break_undo_group();
-                self.tabs[idx].notify_lsp_change();
+
                 self.mode = EditorMode::Insert;
                 Ok(ExecOutcome::Continue)
             }
@@ -406,7 +541,7 @@ impl EditorState {
                 } {
                     self.yank_to_register(&deleted);
                 }
-                self.tabs[idx].notify_lsp_change();
+
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::SubstituteLine => {
@@ -414,20 +549,20 @@ impl EditorState {
                 let buf = self.focused_buf_mut();
                 buf.delete_lines(1);
                 buf.break_undo_group();
-                self.tabs[idx].notify_lsp_change();
+
                 self.mode = EditorMode::Insert;
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::JoinLines(n) => {
                 self.focused_buf_mut().join_lines(n);
                 self.focused_buf_mut().break_undo_group();
-                self.tabs[idx].notify_lsp_change();
+
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::ToggleCase => {
                 self.focused_buf_mut().toggle_case_at_cursor();
                 self.focused_buf_mut().break_undo_group();
-                self.tabs[idx].notify_lsp_change();
+
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::Indent(n) => {
@@ -435,14 +570,362 @@ impl EditorState {
                 let et = self.config.editor.expand_tab;
                 self.focused_buf_mut().indent_lines(n, tw, et);
                 self.focused_buf_mut().break_undo_group();
-                self.tabs[idx].notify_lsp_change();
+
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::Dedent(n) => {
                 let tw = self.config.editor.tab_width;
                 self.focused_buf_mut().dedent_lines(n, tw);
                 self.focused_buf_mut().break_undo_group();
-                self.tabs[idx].notify_lsp_change();
+
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::IncrementNumber | EditorCommand::DecrementNumber => {
+                let delta: i64 = if matches!(cmd, EditorCommand::IncrementNumber) { 1 } else { -1 };
+                let buf = self.focused_buf();
+                let cursor = buf.cursor();
+                let line = buf.get_line(cursor.line).unwrap_or_default();
+                // Find the number at or after cursor position
+                let chars: Vec<char> = line.chars().collect();
+                let mut num_start = None;
+                let mut num_end;
+                // Search from cursor position forward for a digit
+                for i in cursor.column..chars.len() {
+                    if chars[i].is_ascii_digit() || (chars[i] == '-' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit()) {
+                        num_start = Some(i);
+                        break;
+                    }
+                }
+                if num_start.is_none() {
+                    // Search backwards from cursor
+                    for i in (0..=cursor.column.min(chars.len().saturating_sub(1))).rev() {
+                        if chars[i].is_ascii_digit() {
+                            num_start = Some(i);
+                            break;
+                        }
+                    }
+                }
+                if let Some(start) = num_start {
+                    // Find full extent of number (including leading minus)
+                    let actual_start = if start > 0 && chars[start - 1] == '-' { start - 1 } else { start };
+                    num_end = start;
+                    while num_end < chars.len() && chars[num_end].is_ascii_digit() {
+                        num_end += 1;
+                    }
+                    let num_str: String = chars[actual_start..num_end].iter().collect();
+                    if let Ok(n) = num_str.parse::<i64>() {
+                        let new_n = n + delta;
+                        let new_str = new_n.to_string();
+                        // Replace in buffer
+                        let buf = self.focused_buf_mut();
+                        buf.set_cursor_pos(novim_types::Position::new(cursor.line, actual_start));
+                        for _ in actual_start..num_end {
+                            buf.delete_char_forward();
+                        }
+                        for c in new_str.chars() {
+                            buf.insert_char(c);
+                        }
+                        buf.break_undo_group();
+                        self.status_message = Some(format!("{} → {}", n, new_n));
+                    }
+                } else {
+                    self.status_message = Some("No number found".to_string());
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::UpperCaseMotion(dir, n) | EditorCommand::LowerCaseMotion(dir, n) => {
+                let to_upper = matches!(cmd, EditorCommand::UpperCaseMotion(..));
+                let start = self.focused_buf().cursor();
+                // Move cursor by motion to find the range
+                for _ in 0..n {
+                    self.focused_buf_mut().move_cursor(dir);
+                }
+                let end = self.focused_buf().cursor();
+                let (from, to) = if (start.line, start.column) <= (end.line, end.column) {
+                    (start, end)
+                } else {
+                    (end, start)
+                };
+                // Get text in range and transform
+                if from.line == to.line {
+                    if let Some(line) = self.focused_buf().get_line(from.line) {
+                        let chars: Vec<char> = line.chars().collect();
+                        let start_col = from.column.min(chars.len());
+                        let end_col = to.column.min(chars.len());
+                        let segment: String = chars[start_col..end_col].iter().collect();
+                        let transformed = if to_upper { segment.to_uppercase() } else { segment.to_lowercase() };
+                        let buf = self.focused_buf_mut();
+                        buf.set_cursor_pos(from);
+                        for _ in start_col..end_col {
+                            buf.delete_char_forward();
+                        }
+                        for c in transformed.chars() {
+                            buf.insert_char(c);
+                        }
+                        buf.set_cursor_pos(from);
+                        buf.break_undo_group();
+                    }
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::UpperCaseLine | EditorCommand::LowerCaseLine => {
+                let to_upper = matches!(cmd, EditorCommand::UpperCaseLine);
+                let cursor = self.focused_buf().cursor();
+                if let Some(line) = self.focused_buf().get_line(cursor.line) {
+                    let transformed = if to_upper { line.to_uppercase() } else { line.to_lowercase() };
+                    let buf = self.focused_buf_mut();
+                    buf.set_cursor_pos(novim_types::Position::new(cursor.line, 0));
+                    // Delete entire line content
+                    let len = line.chars().count();
+                    for _ in 0..len {
+                        buf.delete_char_forward();
+                    }
+                    for c in transformed.chars() {
+                        buf.insert_char(c);
+                    }
+                    buf.set_cursor_pos(novim_types::Position::new(cursor.line, 0));
+                    buf.break_undo_group();
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ReadFile(path) => {
+                let resolved = PathBuf::from(path.as_str());
+                match std::fs::read_to_string(&resolved) {
+                    Ok(content) => {
+                        let buf = self.focused_buf_mut();
+                        // Move to end of current line
+                        buf.move_cursor(novim_types::Direction::LineEnd);
+                        buf.insert_char('\n');
+                        for c in content.chars() {
+                            buf.insert_char(c);
+                        }
+                        buf.break_undo_group();
+                        let lines = content.lines().count();
+                        self.status_message = Some(format!("{} lines inserted from {}", lines, path));
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("read: {}", e));
+                    }
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ReadCommand(cmd_str) => {
+                match std::process::Command::new("sh").arg("-c").arg(cmd_str.as_str()).output() {
+                    Ok(output) => {
+                        let content = String::from_utf8_lossy(&output.stdout);
+                        let buf = self.focused_buf_mut();
+                        buf.move_cursor(novim_types::Direction::LineEnd);
+                        buf.insert_char('\n');
+                        for c in content.chars() {
+                            buf.insert_char(c);
+                        }
+                        buf.break_undo_group();
+                        let lines = content.lines().count();
+                        self.status_message = Some(format!("{} lines from command", lines));
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("read!: {}", e));
+                    }
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::SortLines => {
+                let buf = self.focused_buf();
+                let total = buf.len_lines();
+                let mut lines: Vec<String> = (0..total)
+                    .filter_map(|i| buf.get_line(i))
+                    .collect();
+                lines.sort();
+                // Replace buffer: delete all, then re-insert sorted
+                let buf = self.focused_buf_mut();
+                buf.set_cursor_pos(novim_types::Position::new(0, 0));
+                buf.delete_lines(total);
+                for (i, line) in lines.iter().enumerate() {
+                    for c in line.chars() {
+                        buf.insert_char(c);
+                    }
+                    if i + 1 < lines.len() {
+                        buf.insert_char('\n');
+                    }
+                }
+                buf.set_cursor_pos(novim_types::Position::new(0, 0));
+                buf.break_undo_group();
+                self.status_message = Some(format!("{} lines sorted", total));
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::PipeToCommand(cmd_str) => {
+                let buf = self.focused_buf();
+                let total = buf.len_lines();
+                let mut text = String::new();
+                for i in 0..total {
+                    if let Some(line) = buf.get_line(i) {
+                        text.push_str(&line);
+                        text.push('\n');
+                    }
+                }
+                match std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd_str.as_str())
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                {
+                    Ok(mut child) => {
+                        if let Some(ref mut stdin) = child.stdin {
+                            use std::io::Write;
+                            let _ = stdin.write_all(text.as_bytes());
+                        }
+                        drop(child.stdin.take()); // close stdin
+                        match child.wait_with_output() {
+                            Ok(output) => {
+                                let stdout = String::from_utf8_lossy(&output.stdout);
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                if !stderr.is_empty() {
+                                    self.status_message = Some(format!("stderr: {}", stderr.trim()));
+                                } else if !stdout.is_empty() {
+                                    let lines = stdout.lines().count();
+                                    self.status_message = Some(format!("{} lines of output", lines));
+                                } else {
+                                    self.status_message = Some("Command completed".to_string());
+                                }
+                            }
+                            Err(e) => self.status_message = Some(format!("w!: {}", e)),
+                        }
+                    }
+                    Err(e) => self.status_message = Some(format!("w!: {}", e)),
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::FormatLine => {
+                let tw = self.config.editor.text_width;
+                let width = if tw == 0 { 80 } else { tw };
+                let cursor = self.focused_buf().cursor();
+                if let Some(line) = self.focused_buf().get_line(cursor.line) {
+                    let trimmed = line.trim();
+                    if trimmed.len() <= width {
+                        // Already fits, nothing to do
+                        return Ok(ExecOutcome::Continue);
+                    }
+                    // Wrap the line
+                    let words: Vec<&str> = trimmed.split_whitespace().collect();
+                    let mut lines = Vec::new();
+                    let mut current = String::new();
+                    for word in words {
+                        if current.is_empty() {
+                            current = word.to_string();
+                        } else if current.len() + 1 + word.len() <= width {
+                            current.push(' ');
+                            current.push_str(word);
+                        } else {
+                            lines.push(current);
+                            current = word.to_string();
+                        }
+                    }
+                    if !current.is_empty() {
+                        lines.push(current);
+                    }
+                    // Replace the line with wrapped lines
+                    let buf = self.focused_buf_mut();
+                    buf.set_cursor_pos(novim_types::Position::new(cursor.line, 0));
+                    let old_len = line.chars().count();
+                    for _ in 0..old_len {
+                        buf.delete_char_forward();
+                    }
+                    for (i, formatted_line) in lines.iter().enumerate() {
+                        for c in formatted_line.chars() {
+                            buf.insert_char(c);
+                        }
+                        if i + 1 < lines.len() {
+                            buf.insert_char('\n');
+                        }
+                    }
+                    buf.set_cursor_pos(novim_types::Position::new(cursor.line, 0));
+                    buf.break_undo_group();
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::FormatMotion(dir, n) => {
+                let tw = self.config.editor.text_width;
+                let width = if tw == 0 { 80 } else { tw };
+                let start_line = self.focused_buf().cursor().line;
+                // Move by motion to find end line
+                for _ in 0..n {
+                    self.focused_buf_mut().move_cursor(dir);
+                }
+                let end_line = self.focused_buf().cursor().line;
+                let (from, to) = if start_line <= end_line { (start_line, end_line) } else { (end_line, start_line) };
+                // Collect all text from the range
+                let mut text = String::new();
+                for line_idx in from..=to {
+                    if let Some(line) = self.focused_buf().get_line(line_idx) {
+                        if !text.is_empty() { text.push(' '); }
+                        text.push_str(line.trim());
+                    }
+                }
+                // Word-wrap
+                let words: Vec<&str> = text.split_whitespace().collect();
+                let mut lines = Vec::new();
+                let mut current = String::new();
+                for word in words {
+                    if current.is_empty() {
+                        current = word.to_string();
+                    } else if current.len() + 1 + word.len() <= width {
+                        current.push(' ');
+                        current.push_str(word);
+                    } else {
+                        lines.push(current);
+                        current = word.to_string();
+                    }
+                }
+                if !current.is_empty() {
+                    lines.push(current);
+                }
+                // Delete original lines and insert formatted
+                let buf = self.focused_buf_mut();
+                buf.set_cursor_pos(novim_types::Position::new(from, 0));
+                let count = to - from + 1;
+                buf.delete_lines(count);
+                for (i, formatted_line) in lines.iter().enumerate() {
+                    for c in formatted_line.chars() {
+                        buf.insert_char(c);
+                    }
+                    if i + 1 < lines.len() {
+                        buf.insert_char('\n');
+                    }
+                }
+                buf.set_cursor_pos(novim_types::Position::new(from, 0));
+                buf.break_undo_group();
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::AutoIndent => {
+                let cursor = self.focused_buf().cursor();
+                // Get previous line's indentation
+                let prev_indent = if cursor.line > 0 {
+                    self.focused_buf().get_line(cursor.line - 1)
+                        .map(|l| l.chars().take_while(|c| c.is_whitespace()).collect::<String>())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                // Get current line
+                if let Some(current_line) = self.focused_buf().get_line(cursor.line) {
+                    let content = current_line.trim_start().to_string();
+                    let new_line = format!("{}{}", prev_indent, content);
+                    let buf = self.focused_buf_mut();
+                    buf.set_cursor_pos(novim_types::Position::new(cursor.line, 0));
+                    let old_len = current_line.chars().count();
+                    for _ in 0..old_len {
+                        buf.delete_char_forward();
+                    }
+                    for c in new_line.chars() {
+                        buf.insert_char(c);
+                    }
+                    // Position cursor at first non-blank
+                    let first_non_blank = prev_indent.chars().count();
+                    buf.set_cursor_pos(novim_types::Position::new(cursor.line, first_non_blank));
+                    buf.break_undo_group();
+                }
                 Ok(ExecOutcome::Continue)
             }
             _ => Ok(ExecOutcome::Continue),
@@ -505,8 +988,10 @@ impl EditorState {
                 let focused_id = self.tabs[idx].panes.focused_id();
                 if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
                     if pane.content.as_buffer_like().is_terminal() {
-                        pane.copy_mode_offset = 1; // enter copy mode at offset 1
-                        self.status_message = Some("Copy mode (q/Esc to exit, j/k to scroll)".to_string());
+                        pane.copy_mode_offset = 1;
+                        pane.copy_mode_cursor = (0, 0);
+                        pane.copy_mode_selection = None;
+                        self.status_message = Some("Copy mode (v=select, y=yank, q=exit)".to_string());
                     } else {
                         self.status_message = Some("Copy mode only works in terminal panes".to_string());
                     }
@@ -517,6 +1002,7 @@ impl EditorState {
                 let focused_id = self.tabs[idx].panes.focused_id();
                 if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
                     pane.copy_mode_offset = 0;
+                    pane.copy_mode_selection = None;
                 }
                 self.status_message = None;
                 Ok(ExecOutcome::Continue)
@@ -533,12 +1019,15 @@ impl EditorState {
         match cmd {
             EditorCommand::CommandInput(c) => {
                 self.command_buffer.push(c);
+                // Reset completion on any typed input
+                self.cmd_completion.reset();
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::CommandBackspace => {
                 if self.command_buffer.pop().is_none() {
                     self.mode = EditorMode::Normal;
                 }
+                self.cmd_completion.reset();
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::CommandExecute => {
@@ -549,6 +1038,7 @@ impl EditorState {
                 self.command_history_idx = self.command_history.len();
                 self.mode = EditorMode::Normal;
                 self.command_buffer.clear();
+                self.cmd_completion.reset();
                 let parsed = parse_ex_command(&cmd_str);
                 self.execute(parsed, screen_area)
             }
@@ -569,9 +1059,49 @@ impl EditorState {
                 }
                 Ok(ExecOutcome::Continue)
             }
+            EditorCommand::CommandTab | EditorCommand::CommandTabBack => {
+                let forward = matches!(cmd, EditorCommand::CommandTab);
+                if !self.cmd_completion.active {
+                    // Start new completion
+                    self.cmd_completion.original = self.command_buffer.clone();
+                    let plugin_cmds = self.plugins.command_names();
+                    let candidates = super::completion::complete_command_buffer(&self.command_buffer, &plugin_cmds);
+                    if candidates.is_empty() {
+                        return Ok(ExecOutcome::Continue);
+                    }
+                    self.cmd_completion.candidates = candidates;
+                    self.cmd_completion.selected = 0;
+                    self.cmd_completion.active = true;
+                } else {
+                    // Cycle through candidates
+                    if forward {
+                        self.cmd_completion.selected = (self.cmd_completion.selected + 1)
+                            % self.cmd_completion.candidates.len();
+                    } else {
+                        self.cmd_completion.selected = if self.cmd_completion.selected == 0 {
+                            self.cmd_completion.candidates.len() - 1
+                        } else {
+                            self.cmd_completion.selected - 1
+                        };
+                    }
+                }
+                // Apply the selected candidate to the command buffer
+                let candidate = self.cmd_completion.candidates[self.cmd_completion.selected].clone();
+                let original = &self.cmd_completion.original;
+                // If original has a space, replace only the argument part
+                if let Some(space_pos) = original.rfind(' ') {
+                    let prefix = &original[..=space_pos];
+                    self.command_buffer = format!("{}{}", prefix, candidate);
+                } else {
+                    // Replace the whole command
+                    self.command_buffer = candidate;
+                }
+                Ok(ExecOutcome::Continue)
+            }
             EditorCommand::CommandCancel => {
                 self.command_buffer.clear();
                 self.command_history_idx = self.command_history.len();
+                self.cmd_completion.reset();
                 self.mode = EditorMode::Normal;
                 Ok(ExecOutcome::Continue)
             }
@@ -714,36 +1244,42 @@ impl EditorState {
     }
 
     pub(super) fn execute_lsp_commands(&mut self, cmd: EditorCommand) -> Result<ExecOutcome, NovimError> {
-        let idx = self.active_tab;
         match cmd {
             EditorCommand::ShowHover => {
-                self.with_lsp_client(|client, uri, cursor| {
-                    let _ = client.hover(uri, cursor.line as u32, cursor.column as u32);
-                    None
-                });
+                let cursor = self.focused_buf().cursor();
+                let (ext, uri) = self.focused_file_ext_uri();
+                if let (Some(ext), Some(uri)) = (ext, uri) {
+                    if let Some(lsp) = self.plugins.lsp_plugin() {
+                        lsp.request_hover(&ext, &uri, cursor.line, cursor.column);
+                    }
+                }
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::GotoDefinition => {
                 self.push_jump();
-                let msg = self.with_lsp_client(|client, uri, cursor| {
-                    match client.goto_definition(uri, cursor.line as u32, cursor.column as u32) {
-                        Ok(()) => Some("Looking up definition...".to_string()),
-                        Err(_) => Some("No LSP server running".to_string()),
+                let cursor = self.focused_buf().cursor();
+                let (ext, uri) = self.focused_file_ext_uri();
+                if let (Some(ext), Some(uri)) = (ext, uri) {
+                    if let Some(lsp) = self.plugins.lsp_plugin() {
+                        lsp.request_goto_definition(&ext, &uri, cursor.line, cursor.column);
+                        self.status_message = Some("Looking up definition...".to_string());
+                    } else {
+                        self.status_message = Some("No LSP available".to_string());
                     }
-                });
-                if let Some(msg) = msg {
-                    self.status_message = Some(msg);
                 }
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::TriggerCompletion => {
-                let msg = self.with_lsp_client(|client, uri, cursor| {
-                    match client.completion(uri, cursor.line as u32, cursor.column as u32) {
-                        Ok(()) => Some("Requesting completions...".to_string()),
-                        Err(e) => Some(format!("Completion error: {}", e)),
+                let cursor = self.focused_buf().cursor();
+                let (ext, uri) = self.focused_file_ext_uri();
+                if let (Some(ext), Some(uri)) = (ext, uri) {
+                    if let Some(lsp) = self.plugins.lsp_plugin() {
+                        lsp.request_completion(&ext, &uri, cursor.line, cursor.column);
+                        self.status_message = Some("Requesting completions...".to_string());
+                    } else {
+                        self.status_message = Some("No LSP available".to_string());
                     }
-                });
-                self.status_message = msg.or(Some("No LSP available".to_string()));
+                }
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::CompletionUp => {
@@ -766,7 +1302,7 @@ impl EditorState {
                         for c in text.chars() {
                             buf.insert_char(c);
                         }
-                        self.tabs[idx].notify_lsp_change();
+        
                     }
                     self.completion.visible = false;
                     self.completion.items.clear();
@@ -1075,6 +1611,71 @@ impl EditorState {
                 }
                 Ok(ExecOutcome::Continue)
             }
+            EditorCommand::ScrollLineDown => {
+                let focused_id = self.tabs[idx].panes.focused_id();
+                if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
+                    let max = pane.content.as_buffer_like().len_lines().saturating_sub(1);
+                    pane.viewport_offset = (pane.viewport_offset + 1).min(max);
+                    // Move cursor if it scrolled off screen
+                    let cursor = pane.content.as_buffer_like().cursor();
+                    if cursor.line < pane.viewport_offset {
+                        pane.content.as_buffer_like_mut().set_cursor_pos(
+                            novim_types::Position::new(pane.viewport_offset, cursor.column),
+                        );
+                    }
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ScrollLineUp => {
+                let focused_id = self.tabs[idx].panes.focused_id();
+                if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
+                    pane.viewport_offset = pane.viewport_offset.saturating_sub(1);
+                    // Move cursor if it scrolled off screen
+                    let cursor = pane.content.as_buffer_like().cursor();
+                    let height = screen_area.height.saturating_sub(2) as usize;
+                    if cursor.line >= pane.viewport_offset + height {
+                        let new_line = pane.viewport_offset + height - 1;
+                        pane.content.as_buffer_like_mut().set_cursor_pos(
+                            novim_types::Position::new(new_line, cursor.column),
+                        );
+                    }
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ScreenTop => {
+                let focused_id = self.tabs[idx].panes.focused_id();
+                if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
+                    let target = pane.viewport_offset;
+                    pane.content.as_buffer_like_mut().set_cursor_pos(
+                        novim_types::Position::new(target, 0),
+                    );
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ScreenMiddle => {
+                let focused_id = self.tabs[idx].panes.focused_id();
+                if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
+                    let height = screen_area.height.saturating_sub(2) as usize;
+                    let max = pane.content.as_buffer_like().len_lines().saturating_sub(1);
+                    let target = (pane.viewport_offset + height / 2).min(max);
+                    pane.content.as_buffer_like_mut().set_cursor_pos(
+                        novim_types::Position::new(target, 0),
+                    );
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ScreenBottom => {
+                let focused_id = self.tabs[idx].panes.focused_id();
+                if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
+                    let height = screen_area.height.saturating_sub(2) as usize;
+                    let max = pane.content.as_buffer_like().len_lines().saturating_sub(1);
+                    let target = (pane.viewport_offset + height.saturating_sub(1)).min(max);
+                    pane.content.as_buffer_like_mut().set_cursor_pos(
+                        novim_types::Position::new(target, 0),
+                    );
+                }
+                Ok(ExecOutcome::Continue)
+            }
             EditorCommand::ScrollUp => {
                 let n = self.config.editor.scroll_lines;
                 let focused_id = self.tabs[idx].panes.focused_id();
@@ -1204,7 +1805,7 @@ impl EditorState {
                         let in_terminal = self.focused_buf().is_terminal();
                         let popup_showing = self.show_help || self.tabs[self.active_tab].show_buffer_list;
                         let (cmd, new_input_state) =
-                            key_to_command(self.mode, self.input_state, key, in_terminal, popup_showing, false);
+                            key_to_command(self.mode, self.input_state, key, in_terminal, popup_showing, false, self.macros.recording.is_some());
                         self.input_state = new_input_state;
                         self.execute(cmd, screen_area)?;
                     }
@@ -1255,9 +1856,43 @@ impl EditorState {
                 }
                 Ok(ExecOutcome::Continue)
             }
+            EditorCommand::JumpToLastPosition => {
+                // Jump to where we were before the last jump (uses jump list)
+                if self.jump_index > 0 {
+                    self.push_jump();
+                    self.navigate_jump_list(false)
+                } else {
+                    self.status_message = Some("No previous position".to_string());
+                    Ok(ExecOutcome::Continue)
+                }
+            }
             EditorCommand::JumpBack => self.navigate_jump_list(false),
             EditorCommand::JumpForward => self.navigate_jump_list(true),
             _ => Ok(ExecOutcome::Continue),
+        }
+    }
+
+    /// Helper: get the file extension and URI for the focused buffer.
+    fn focused_file_ext_uri(&self) -> (Option<String>, Option<String>) {
+        let pane = self.tabs[self.active_tab].panes.focused_pane();
+        match &pane.content {
+            crate::pane::PaneContent::Editor(buf) => {
+                let path = buf.file_path_str().map(|s| s.to_string());
+                let ext = path.as_ref().and_then(|p| {
+                    std::path::Path::new(p).extension().and_then(|e| e.to_str()).map(|s| s.to_string())
+                });
+                let uri = path.map(|p| {
+                    let pb = std::path::PathBuf::from(&p);
+                    let abs = pb.canonicalize().unwrap_or_else(|_| {
+                        if pb.is_absolute() { pb } else {
+                            std::env::current_dir().unwrap_or_default().join(pb)
+                        }
+                    });
+                    format!("file://{}", abs.display())
+                });
+                (ext, uri)
+            }
+            _ => (None, None),
         }
     }
 
@@ -1308,6 +1943,15 @@ impl EditorState {
         let idx = self.active_tab;
         if self.tabs[idx].panes.pane_count() > 1 {
             self.tabs[idx].panes.close_focused();
+            // Clear diff highlights on remaining panes (diff view closed)
+            let focused_id = self.tabs[idx].panes.focused_id();
+            if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
+                if let crate::pane::PaneContent::Editor(buf) = &mut pane.content {
+                    if !buf.diff_lines.is_empty() {
+                        buf.diff_lines.clear();
+                    }
+                }
+            }
         } else {
             return Err(NovimError::Command("Cannot close last pane".to_string()));
         }
@@ -1428,6 +2072,14 @@ impl EditorState {
                 self.config.editor.word_wrap = false;
                 self.status_message = Some("wrap off".to_string());
             }
+            "minimap" => {
+                self.config.editor.minimap = true;
+                self.status_message = Some("minimap on".to_string());
+            }
+            "nominimap" => {
+                self.config.editor.minimap = false;
+                self.status_message = Some("minimap off".to_string());
+            }
             _ if opt.starts_with("tabstop=") || opt.starts_with("ts=") => {
                 let val = opt.split('=').nth(1).unwrap_or("4");
                 if let Ok(tw) = val.parse::<usize>() {
@@ -1461,11 +2113,16 @@ impl EditorState {
             .iter()
             .position(|p| p == &path_str)
             .unwrap_or(0);
-        if self.config.lsp.enabled {
-            self.tabs[idx].ensure_lsp_for_buffer(self.config.lsp.enabled);
-        }
         let tw = self.config.editor.tab_width;
         self.focused_buf_mut().recompute_folds(tw);
+
+        // Emit BufOpen so the LSP plugin starts a server for this file
+        let snapshot = self.make_buffer_snapshot();
+        let event = crate::plugin::EditorEvent::BufOpen { path: path_str };
+        let screen = novim_types::Rect::new(0, 0, 80, 24);
+        let actions = self.plugins.dispatch(&event, &snapshot);
+        self.run_plugin_actions(actions, screen);
+
         Ok(ExecOutcome::Continue)
     }
 

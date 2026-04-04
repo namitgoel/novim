@@ -575,76 +575,114 @@ examples/plugins/
 
 ---
 
-## v2.0.0 — Vim/tmux/WezTerm Parity
+## v2.0.0 — Complete
 
-### Vim — Easy (target: v2.0.0)
+### Code Quality
+- Deduplicated TUI/GUI shared code: moved `snap_to_char_boundary`, `char_col_to_byte`, `truncate_str`, `wrap_line`, `wrapped_row_count` to `novim-core/text_utils.rs`
+- Extracted `HighlightGroup::theme_color()` and `is_bold()` to eliminate duplicated match arms
+- Created shared `help.rs` module — single source of truth for help popup content (TUI + GUI)
+- Extracted `StatusBarInfo` + `status_bar_info()` — shared status bar computation
+- Data-driven command registry: `BUILTIN_COMMANDS` table drives both `parse_ex_command()` and tab completion
 
-| Feature | Keys | Notes |
-|---------|------|-------|
-| Yank to EOL | `Y` | Map to `y$` (neovim behavior) |
-| Scroll one line | `Ctrl+E`/`Ctrl+Y` | Scroll without moving cursor |
-| Screen jump | `H`/`M`/`L` | Jump to top/middle/bottom of visible screen |
-| Jump to last pos | `''` | Two single quotes → jump before last jump |
-| Change directory | `:cd`/`:lcd` | Set workspace CWD |
-| File info | `Ctrl+G` | Show filename, line count, cursor % |
-| Visual indent | `>`/`<` in visual mode | Indent/dedent selected lines |
-| Visual case | `~`/`U`/`u` in visual mode | Toggle/upper/lower case on selection |
+### Vim Features Added
+- **Yank to EOL** — `Y` maps to `y$` (neovim behavior)
+- **Scroll one line** — `Ctrl+E`/`Ctrl+Y` scroll viewport without moving cursor
+- **Screen jump** — `H`/`M`/`L` jump to top/middle/bottom of visible screen
+- **Jump to last position** — `''`/` `` ` jumps before last jump (uses jump list)
+- **Change directory** — `:cd`/`:lcd` with `~` expansion
+- **File info** — `Ctrl+G` shows filename, line count, cursor percentage
+- **Visual indent** — `>`/`<` in visual mode indent/dedent selection
+- **Visual case** — `~`/`U`/`u` in visual mode toggle/upper/lower case
+- **Increment/decrement** — `Ctrl+A`/`Ctrl+X` find number at/after cursor, +1/-1
+- **Case with motion** — `gU`/`gu` + motion, `gUU`/`guu` for whole line
+- **Insert file/cmd** — `:read file` / `:read !cmd` insert content below cursor
+- **Sort lines** — `:sort` sorts all buffer lines
+- **Pipe to command** — `:w !cmd` sends buffer to external command stdin
+- **Auto-indent** — `==` re-indents current line to match previous line
+- **Tab completion** — `Tab`/`Shift+Tab` in `:` mode completes commands, file paths, `:set` options
+- **Quickfix list** — `:copen`, `:cn`/`:cp`, `:cclose`, `:make` with compiler output parsing
+- **Command window** — `q:` opens scrollable command history, Enter to execute
+- **Format text** — `gq` + motion / `gqq` wraps text to `text_width` (default 80)
 
-### Vim — Medium (target: v2.0.0)
+### tmux Features Added
+- **Copy mode selection** — `v` starts selection, `y` yanks text, `h/j/k/l` cursor movement in scrollback
+- **Status line customization** — configurable `[status_bar]` with `left`/`right` format templates and placeholders (`{mode}`, `{file}`, `{line}`, `{lsp}`, `{branch}`, etc.)
 
-| Feature | Keys | Notes |
-|---------|------|-------|
-| Increment/decrement | `Ctrl+A`/`Ctrl+X` | Find number at/after cursor, +1/-1 |
-| Case with motion | `gU`/`gu` + motion | `gUw` uppercase word, `guu` lowercase line |
-| Insert file/cmd | `:read file` / `:read !cmd` | Insert output into buffer |
-| Sort lines | `:sort` / `:'<,'>sort` | Sort selected or all lines |
-| Pipe to command | `:w !cmd` | Send buffer to external command |
-| Auto-indent | `==` | Re-indent current line based on context |
-
-### Vim — Hard (target: v2.1.0+)
-
-| Feature | Notes |
-|---------|-------|
-| Tab completion in `:` mode | Complete commands, file paths, options |
-| Quickfix / location list | `:copen`, `:cnext`, `:cprev` for build errors |
-| Command window `q:` | Edit command history as a buffer |
-| Format text `gq` | Wrap/reformat text with motion |
-
-### tmux (target: v2.0.0)
-
-| Feature | Notes |
-|---------|-------|
-| Copy mode selection | `v` to start selection, `y` to yank in copy mode |
-| Status line customization | Configurable status bar segments via TOML |
-
-### WezTerm / Terminal (target: v2.0.0)
-
-| Feature | Notes |
-|---------|-------|
-| 24-bit true color | Add `CellColor::Rgb(u8, u8, u8)` + parse `38;2;R;G;B` in performer |
-| OSC 133 prompt markers | Mark prompt/command/output boundaries for smart scrolling |
-| Clickable hyperlinks | OSC 8 hyperlink support + mouse click handler |
+### WezTerm / Terminal Features Added
+- **24-bit true color** — `CellColor::Rgb(u8, u8, u8)`, SGR `38;2;R;G;B` and `48;2;R;G;B` parsing
+- **OSC 133 prompt markers** — shell integration, prompt positions stored for navigation
+- **OSC 8 clickable hyperlinks** — URL stored per cell, mouse click opens URL via `open_url()`
 
 ---
 
-## v2.1.0+ — Advanced Features
+## v2.1.0 — Complete
+
+### Plugin System
+- **Plugin manifest** — `plugin.toml` with name, version, description, author, dependencies, entry point
+- **Plugin install** — `:PlugInstall <url>` clones from git, `:PlugUpdate`, `:PlugRemove`
+- **Floating windows** — `novim.ui.float(title, lines, opts)` plugin API, TUI rendering with scroll, Esc to close
+- Example plugin: `float_preview.lua` (`:Preview`, `:Changelog`, `Ctrl+h` cheatsheet)
+
+### Code Navigation
+- **Tree-sitter symbols** — `Ctrl+T` / `:symbols` opens fuzzy-filterable symbol list popup
+- Symbol extraction for Rust (functions, structs, enums, traits, modules, consts), JS/TS (functions, methods, classes), Python (functions, classes)
+- `SymbolInfo` with `name`, `kind`, `line`, `end_line`, `depth` for nesting
+- **Symbol outline sidebar** — `:outline` toggles persistent sidebar with indented symbol tree
+- Icons per type: `ƒ` function, `◆` struct, `◇` enum, `◈` trait, `▸` module, `●` const
+- Color-coded by kind, auto-highlights current symbol based on cursor position
+- **Breadcrumb bar** — shows current location as `module > struct > function` above pane area
+- Updates on every cursor movement via `breadcrumb_at()` containment check
+
+### Git Integration
+- **Inline blame** — `:blame`/`:Gblame` toggles per-line blame (author, date, commit summary)
+- Uses `git2` crate for blame computation, displayed as dim italic text after line content
+- **Diff view** — `:diff`/`:Gdiff` opens vertical split with HEAD version
+- Syntax-highlighted HEAD buffer with proper display label (`file.rs (HEAD)`)
+- Line-level diff highlighting: green (added), red (removed), yellow (changed)
+- Diff highlights auto-clear when closing the diff pane
+
+### Code Overview
+- **Minimap** — `:minimap` / `:set minimap` toggles Braille-character code overview
+- Each terminal cell = 2×4 dot grid for sub-character resolution
+- Viewport region highlighted in blue, cursor line in yellow
+- Click-to-jump: mouse click on minimap scrolls to that line
+- Configurable: `minimap_width` (default 8), off by default
+
+### Keybindings Added
+
+| Key | Mode | Action |
+|-----|------|--------|
+| `Y` | Normal | Yank to EOL |
+| `Ctrl+E`/`Ctrl+Y` | Normal | Scroll one line |
+| `H`/`M`/`L` | Normal | Screen top/middle/bottom |
+| `''` | Normal | Jump to last position |
+| `Ctrl+G` | Normal | File info |
+| `Ctrl+A`/`Ctrl+X` | Normal | Increment/decrement number |
+| `gU`/`gu` + motion | Normal | Uppercase/lowercase with motion |
+| `gUU`/`guu` | Normal | Uppercase/lowercase line |
+| `gq` + motion / `gqq` | Normal | Format/wrap text |
+| `==` | Normal | Auto-indent line |
+| `>`/`<` | Visual | Indent/dedent selection |
+| `~`/`U`/`u` | Visual | Case operations on selection |
+| `v` | Copy mode | Start/toggle selection |
+| `y` | Copy mode | Yank selected text |
+| `Tab`/`Shift+Tab` | Command | Complete command/path/option |
+| `q:` | Normal | Command history window |
+| `Ctrl+T` | Normal | Symbol list popup |
+
+---
+
+## v3.0.0 — Future
 
 ### Near-term
-- Plugin manifest (name, version, dependencies in `.toml`)
-- Plugin install from git URLs / package manager
-- Floating windows (plugin-created, resizable)
-- Tree-sitter based code navigation (go to function, list symbols)
+- AI code completion (ghost text from LLM APIs, Tab to accept)
+- Full Vim compatibility layer
 
 ### Medium-term
-- Inline git blame, diff view
-- Minimap / code overview
-- Breadcrumbs / symbol outline
-- DAP (Debug Adapter Protocol) integration
-- LSP migration to plugin (if async plugin model is built)
+- DAP (Debug Adapter Protocol) — breakpoints, stepping, variable inspection
+- LSP migration to plugin (requires async plugin model)
 
 ### Long-term
 - Collaborative editing (CRDT-based)
 - Remote development (SSH + local GUI)
 - Web version (WASM + WebGPU)
-- AI code completion integration
-- Full Vim compatibility layer

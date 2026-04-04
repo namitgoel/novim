@@ -7,6 +7,7 @@
 //! Rendering is handled by novim-tui (or a future novim-gui).
 //! FFI is handled by novim-neon.
 
+pub mod async_task;
 pub mod buffer;
 pub mod config;
 pub mod editor;
@@ -18,6 +19,8 @@ pub use plugin::builtins::syntax as highlight;
 pub mod lsp;
 pub mod error;
 pub mod fold;
+pub mod git;
+pub mod help;
 pub mod input;
 pub mod pane;
 pub mod session;

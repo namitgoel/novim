@@ -76,27 +76,20 @@ impl TerminalManager {
     }
 
     pub fn run(&mut self) -> io::Result<()> {
-        // Start LSP for the initial buffer
-        if self.state.config.lsp.enabled {
-            self.state.tabs[self.state.active_tab].ensure_lsp_for_buffer(true);
-        }
-
         // Compute folds for the initial buffer
         let tw = self.state.config.editor.tab_width;
         self.state.focused_buf_mut().recompute_folds(tw);
 
+        // Note: BufOpen is now emitted from EditorState constructor and handle_edit_file
+
         loop {
             // Poll terminals for all workspaces, LSP only for inactive ones
-            let active = self.state.active_tab;
-            for (i, ws) in self.state.tabs.iter_mut().enumerate() {
+            for ws in self.state.tabs.iter_mut() {
                 ws.poll_terminals();
-                if i != active {
-                    ws.poll_lsp();
-                }
             }
 
-            // Process LSP events for the active workspace (updates EditorState fields)
-            self.state.poll_active_lsp();
+            // Poll background tasks (git blame, :make, etc.)
+            self.state.poll_tasks();
 
             // Check for external file changes (auto-reload)
             self.state.check_external_changes();
@@ -251,6 +244,81 @@ impl TerminalManager {
                             }
                         }
 
+                        // Symbol list: filter, navigate, accept
+                        if self.state.symbol_list.visible {
+                            let cmd = match key.code {
+                                KeyCode::Esc => EditorCommand::SymbolDismiss,
+                                KeyCode::Enter => EditorCommand::SymbolAccept,
+                                KeyCode::Up | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => EditorCommand::SymbolUp,
+                                KeyCode::Down | KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => EditorCommand::SymbolDown,
+                                KeyCode::Up => EditorCommand::SymbolUp,
+                                KeyCode::Down => EditorCommand::SymbolDown,
+                                KeyCode::Backspace => EditorCommand::SymbolBackspace,
+                                KeyCode::Char(c) => EditorCommand::SymbolInput(c),
+                                _ => EditorCommand::Noop,
+                            };
+                            if !matches!(cmd, EditorCommand::Noop) {
+                                let screen_area = self.screen_area()?;
+                                self.exec(cmd, screen_area);
+                            }
+                            continue;
+                        }
+
+                        // Floating window: Esc closes topmost
+                        if !self.state.floating_windows.is_empty() {
+                            match key.code {
+                                KeyCode::Esc | KeyCode::Char('q') => {
+                                    let screen_area = self.screen_area()?;
+                                    self.exec(EditorCommand::CloseFloat, screen_area);
+                                    continue;
+                                }
+                                KeyCode::Char('j') | KeyCode::Down => {
+                                    if let Some(fw) = self.state.floating_windows.last_mut() {
+                                        let max = fw.lines.len().saturating_sub(1);
+                                        fw.scroll = (fw.scroll + 1).min(max);
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('k') | KeyCode::Up => {
+                                    if let Some(fw) = self.state.floating_windows.last_mut() {
+                                        fw.scroll = fw.scroll.saturating_sub(1);
+                                    }
+                                    continue;
+                                }
+                                _ => { continue; }
+                            }
+                        }
+
+                        // Command window: j/k navigate, Enter executes, q/Esc closes
+                        if self.state.command_window.visible {
+                            match key.code {
+                                KeyCode::Char('k') | KeyCode::Up => {
+                                    if self.state.command_window.selected > 0 {
+                                        self.state.command_window.selected -= 1;
+                                    }
+                                }
+                                KeyCode::Char('j') | KeyCode::Down => {
+                                    if self.state.command_window.selected + 1 < self.state.command_history.len() {
+                                        self.state.command_window.selected += 1;
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    let idx = self.state.command_window.selected;
+                                    if let Some(cmd_str) = self.state.command_history.get(idx).cloned() {
+                                        self.state.command_window.visible = false;
+                                        let parsed = novim_core::input::parse_ex_command(&cmd_str);
+                                        let screen_area = self.screen_area()?;
+                                        self.exec(parsed, screen_area);
+                                    }
+                                }
+                                KeyCode::Esc | KeyCode::Char('q') => {
+                                    self.state.command_window.visible = false;
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
                         // Workspace list active: route keys to workspace selector
                         if self.state.show_workspace_list {
                             let handled = match key.code {
@@ -325,29 +393,13 @@ impl TerminalManager {
                             let copy_offset = self.state.tabs[self.state.active_tab].panes
                                 .get_pane(focused_id).map(|p| p.copy_mode_offset).unwrap_or(0);
                             if copy_offset > 0 {
-                                let cmd = match key.code {
-                                    KeyCode::Char('q') | KeyCode::Esc => EditorCommand::ExitCopyMode,
-                                    KeyCode::Char('k') | KeyCode::Up => {
-                                        // Scroll up in copy mode
-                                        if let Some(pane) = self.state.tabs[self.state.active_tab].panes.get_pane_mut(focused_id) {
-                                            let max = pane.content.as_buffer_like().scrollback_len();
-                                            if pane.copy_mode_offset < max {
-                                                pane.copy_mode_offset += 1;
-                                            }
-                                        }
-                                        EditorCommand::Noop
-                                    }
-                                    KeyCode::Char('j') | KeyCode::Down => {
-                                        // Scroll down in copy mode
-                                        if let Some(pane) = self.state.tabs[self.state.active_tab].panes.get_pane_mut(focused_id) {
-                                            if pane.copy_mode_offset > 1 {
-                                                pane.copy_mode_offset -= 1;
-                                            }
-                                        }
-                                        EditorCommand::Noop
-                                    }
-                                    _ => EditorCommand::Noop,
-                                };
+                                let cmd = novim_core::editor::handle_copy_mode_key(
+                                    &mut self.state.tabs[self.state.active_tab].panes,
+                                    focused_id,
+                                    key,
+                                    &mut self.state.registers,
+                                    &mut self.state.status_message,
+                                );
                                 if !matches!(cmd, EditorCommand::Noop) {
                                     let screen_area = self.screen_area()?;
                                     self.exec(cmd, screen_area);
@@ -382,7 +434,7 @@ impl TerminalManager {
                         let (cmd, new_input_state) = if let Some(custom_cmd) = lookup_custom_keybinding(&key, custom_bindings) {
                             (custom_cmd, InputState::Ready)
                         } else {
-                            key_to_command(self.state.mode, self.state.input_state, key, in_terminal, popup_showing, false)
+                            key_to_command(self.state.mode, self.state.input_state, key, in_terminal, popup_showing, false, self.state.macros.recording.is_some())
                         };
                         // Handle count accumulation
                         if new_input_state == InputState::AccumulatingCount {

@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 
 /// ANSI color
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CellColor {
     #[default]
     Default,
@@ -24,6 +24,8 @@ pub enum CellColor {
     BrightCyan,
     BrightWhite,
     Indexed(u8),
+    /// 24-bit true color (RGB).
+    Rgb(u8, u8, u8),
 }
 
 
@@ -43,6 +45,8 @@ pub struct Cell {
     pub fg: CellColor,
     pub bg: CellColor,
     pub attrs: CellAttrs,
+    /// OSC 8 hyperlink URL attached to this cell, if any.
+    pub hyperlink: Option<String>,
 }
 
 impl Default for Cell {
@@ -52,6 +56,7 @@ impl Default for Cell {
             fg: CellColor::Default,
             bg: CellColor::Default,
             attrs: CellAttrs::default(),
+            hyperlink: None,
         }
     }
 }
@@ -89,6 +94,11 @@ pub struct Grid {
     max_history: usize,
     /// Shell CWD reported via OSC 7 escape sequence.
     pub osc7_cwd: Option<String>,
+    /// OSC 133 prompt markers — stores the row index of each prompt start (type A).
+    /// Used for smart scrolling / prompt-to-prompt navigation.
+    pub prompt_marks: Vec<usize>,
+    /// OSC 8 hyperlink — currently active hyperlink URL (set between OSC 8 open/close).
+    pub active_hyperlink: Option<String>,
 }
 
 impl Grid {
@@ -109,6 +119,8 @@ impl Grid {
             history: VecDeque::new(),
             max_history: 10_000,
             osc7_cwd: None,
+            prompt_marks: Vec::new(),
+            active_hyperlink: None,
         }
     }
 
@@ -197,6 +209,7 @@ impl Grid {
                 fg: self.pen_fg,
                 bg: self.pen_bg,
                 attrs: self.pen_attrs,
+                hyperlink: self.active_hyperlink.clone(),
             };
             if self.cursor_col + 1 >= self.cols {
                 // At last column — set pending wrap instead of wrapping immediately.
@@ -471,5 +484,17 @@ impl Grid {
         } else {
             None
         }
+    }
+
+    /// Record a prompt marker at the current cursor row.
+    pub fn add_prompt_mark(&mut self) {
+        // Store as absolute position: history lines + current screen row
+        let absolute_row = self.history.len() + self.cursor_row;
+        self.prompt_marks.push(absolute_row);
+    }
+
+    /// Get prompt mark positions (absolute row indices).
+    pub fn prompt_marks(&self) -> &[usize] {
+        &self.prompt_marks
     }
 }

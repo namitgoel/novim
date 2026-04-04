@@ -12,6 +12,22 @@ use crate::error::NovimError;
 use crate::fold::FoldState;
 use crate::highlight::{HighlightSpan, SyntaxHighlighter};
 
+/// Line diff kind for side-by-side diff view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffLineKind {
+    Added,
+    Removed,
+    Changed,
+}
+
+/// Git blame information for a single line.
+#[derive(Debug, Clone)]
+pub struct BlameInfo {
+    pub author: String,
+    pub date: String,
+    pub summary: String,
+}
+
 // --- Focused sub-traits for BufferLike ---
 
 /// Core display and navigation shared by all pane content.
@@ -38,6 +54,8 @@ pub trait PaneDisplay {
     fn unfold_all(&mut self) {}
     fn recompute_folds(&mut self, _tab_width: usize) {}
     fn git_sign(&self, _line: usize) -> Option<crate::plugin::GutterSign> { None }
+    fn blame_text(&self, _line: usize) -> Option<String> { None }
+    fn diff_line_kind(&self, _line: usize) -> Option<DiffLineKind> { None }
     fn word_at_cursor(&self) -> Option<String> { None }
     fn find_matching_bracket(&self) -> Option<Position> { None }
 }
@@ -66,6 +84,7 @@ pub trait TextEditing {
     fn find_around_quote(&self, _quote: char) -> Option<(usize, usize)> { None }
     fn find_inner_bracket(&self, _open: char, _close: char) -> Option<(usize, usize)> { None }
     fn find_around_bracket(&self, _open: char, _close: char) -> Option<(usize, usize)> { None }
+    fn get_text_range(&self, _start: usize, _end: usize) -> Option<String> { None }
     fn delete_text_range(&mut self, _start: usize, _end: usize) -> Option<String> { None }
     fn delete_char_forward(&mut self) {}
     fn replace_char(&mut self, _c: char) {}
@@ -124,6 +143,8 @@ pub struct Buffer {
     secondary_cursors: Vec<Position>,
     dirty: bool,
     file_path: Option<PathBuf>,
+    /// Custom display label (e.g. "file.rs (HEAD)" for diff buffers).
+    pub display_label: Option<String>,
     undo_stack: Vec<UndoGroup>,
     redo_stack: Vec<UndoGroup>,
     current_group: Option<UndoGroup>,
@@ -139,6 +160,12 @@ pub struct Buffer {
     version: i32,
     /// Git gutter signs (line → sign)
     pub git_signs: std::collections::HashMap<usize, crate::plugin::GutterSign>,
+    /// Inline git blame data (line → blame info). Populated by :blame command.
+    pub blame_info: std::collections::HashMap<usize, BlameInfo>,
+    /// Whether blame is currently displayed.
+    pub show_blame: bool,
+    /// Diff highlighting: line → DiffLineKind (for side-by-side diff view).
+    pub diff_lines: std::collections::HashMap<usize, DiffLineKind>,
     /// Last known file modification time (for auto-reload detection)
     pub last_modified: Option<std::time::SystemTime>,
 }
@@ -156,6 +183,7 @@ impl Buffer {
             secondary_cursors: Vec::new(),
             dirty: false,
             file_path,
+            display_label: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             current_group: None,
@@ -167,6 +195,9 @@ impl Buffer {
             cached_text: None,
             version: 0,
             git_signs: std::collections::HashMap::new(),
+            blame_info: std::collections::HashMap::new(),
+            show_blame: false,
+            diff_lines: std::collections::HashMap::new(),
             last_modified,
         }
     }
@@ -174,6 +205,19 @@ impl Buffer {
     /// Create a new empty buffer
     pub fn new() -> Self {
         Self::new_with_parts(Rope::new(), None, None, None)
+    }
+
+    /// Mark the buffer as clean (not dirty). Used for read-only diff buffers.
+    pub fn mark_clean(&mut self) {
+        self.dirty = false;
+    }
+
+    /// Create a buffer from a string with syntax highlighting based on file extension.
+    /// Cursor starts at (0,0) and buffer is marked clean.
+    pub fn from_string_with_ext(content: &str, ext: &str) -> Self {
+        let highlighter = SyntaxHighlighter::from_extension(ext);
+        let rope = ropey::Rope::from_str(content);
+        Self::new_with_parts(rope, None, highlighter, None)
     }
 
     /// Load a buffer from a file, or create empty buffer if file doesn't exist
@@ -563,6 +607,12 @@ impl Buffer {
     }
 
     /// Delete a text object range and return the deleted text.
+    /// Get text in a char index range without modifying the buffer.
+    pub fn get_text_range(&self, start: usize, end: usize) -> Option<String> {
+        if start >= end || end > self.rope.len_chars() { return None; }
+        Some(self.rope.slice(start..end).to_string())
+    }
+
     pub fn delete_text_range(&mut self, start: usize, end: usize) -> Option<String> {
         if start >= end || end > self.rope.len_chars() { return None; }
         let deleted = self.rope.slice(start..end).to_string();
@@ -691,6 +741,9 @@ impl PaneDisplay for Buffer {
     }
 
     fn display_name(&self) -> String {
+        if let Some(ref label) = self.display_label {
+            return label.clone();
+        }
         self.file_path
             .as_ref()
             .and_then(|p| p.file_name())
@@ -793,6 +846,17 @@ impl PaneDisplay for Buffer {
 
     fn git_sign(&self, line: usize) -> Option<crate::plugin::GutterSign> {
         self.git_signs.get(&line).copied()
+    }
+
+    fn blame_text(&self, line: usize) -> Option<String> {
+        if !self.show_blame { return None; }
+        self.blame_info.get(&line).map(|b| {
+            format!("  {} | {} | {}", b.author, b.date, b.summary)
+        })
+    }
+
+    fn diff_line_kind(&self, line: usize) -> Option<DiffLineKind> {
+        self.diff_lines.get(&line).copied()
     }
 
     fn word_at_cursor(&self) -> Option<String> {
@@ -1275,6 +1339,7 @@ impl TextEditing for Buffer {
     fn find_around_quote(&self, quote: char) -> Option<(usize, usize)> { Buffer::find_around_quote(self, quote) }
     fn find_inner_bracket(&self, open: char, close: char) -> Option<(usize, usize)> { Buffer::find_inner_bracket(self, open, close) }
     fn find_around_bracket(&self, open: char, close: char) -> Option<(usize, usize)> { Buffer::find_around_bracket(self, open, close) }
+    fn get_text_range(&self, start: usize, end: usize) -> Option<String> { Buffer::get_text_range(self, start, end) }
     fn delete_text_range(&mut self, start: usize, end: usize) -> Option<String> { Buffer::delete_text_range(self, start, end) }
 
     fn delete_char_forward(&mut self) {

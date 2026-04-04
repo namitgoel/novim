@@ -65,6 +65,13 @@ impl CommandRegistry {
         entries.sort_by_key(|(name, _)| *name);
         entries
     }
+
+    /// Return all registered command names (for tab completion).
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.commands.keys().cloned().collect();
+        names.sort();
+        names
+    }
 }
 
 impl Default for CommandRegistry {

@@ -216,6 +216,12 @@ pub(super) fn render_single_pane(
                 }
             });
 
+            let diff_bg = content.diff_line_kind(line_num).map(|k| match k {
+                novim_core::buffer::DiffLineKind::Added => Color::Indexed(22),   // dark green
+                novim_core::buffer::DiffLineKind::Removed => Color::Indexed(52), // dark red
+                novim_core::buffer::DiffLineKind::Changed => Color::Indexed(58), // dark yellow
+            });
+
             let num_style = if is_cursor_line {
                 Style::default().fg(Color::Yellow)
             } else {
@@ -268,7 +274,15 @@ pub(super) fn render_single_pane(
                 ));
             }
 
-            // Layer 4: Secondary cursor highlights
+            // Layer 4: Inline git blame
+            if let Some(blame) = content.blame_text(line_num) {
+                text_spans.push(Span::styled(
+                    blame,
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                ));
+            }
+
+            // Layer 5: Secondary cursor highlights
             for sc in secondary_cursors {
                 if sc.line == line_num {
                     let sc_display = display_col(&raw_line, sc.column, tab_width);
@@ -299,7 +313,7 @@ pub(super) fn render_single_pane(
 
                 if wrap_idx == 0 {
                     // First row: show gutter + full styled text (ratatui handles overflow)
-                    let mut spans = Vec::new();
+                    let mut spans = Vec::with_capacity(text_spans.len() + 3);
                     if !line_label.is_empty() {
                         if let Some(ref marker) = diag_marker {
                             let label = &line_label[..line_label.len().saturating_sub(1)];
@@ -311,13 +325,19 @@ pub(super) fn render_single_pane(
                     } else if let Some(ref marker) = diag_marker {
                         spans.push(marker.clone());
                     }
-                    spans.extend(text_spans.clone());
+                    if let Some(bg) = diff_bg {
+                        spans.extend(text_spans.iter().map(|s| {
+                            Span::styled(s.content.to_string(), s.style.bg(bg))
+                        }));
+                    } else {
+                        spans.extend(text_spans.iter().cloned());
+                    }
                     lines.push(Line::from(spans));
                 } else {
                     // Continuation rows: blank gutter + wrapped segment
-                    let mut spans = Vec::new();
+                    let mut spans = Vec::with_capacity(2);
                     if !line_label.is_empty() {
-                        spans.push(Span::styled("     ".to_string(), num_style));
+                        spans.push(Span::styled("     ", num_style));
                     }
                     spans.push(Span::raw(segment.clone()));
                     lines.push(Line::from(spans));
@@ -361,6 +381,177 @@ pub(super) fn render_single_pane(
     if is_focused && available_height > 0 {
         position_cursor(f, pane, area, ln_mode, tab_width, borderless, cursor_screen_row, cursor_screen_col, available_height);
     }
+}
+
+/// Render a minimap (code overview) using Braille characters for sub-cell resolution.
+///
+/// Each terminal cell contains a 2×4 Braille dot grid, so one minimap cell
+/// represents 2 source columns × 4 source lines. This gives a VS Code-like
+/// zoomed-out code density view.
+pub(super) fn render_minimap(f: &mut ratatui::Frame, area: Rect, pane: &Pane) {
+    let content = pane.content.as_buffer_like();
+    let total_lines = content.len_lines().max(1);
+    let height = area.height as usize;
+    let map_width = area.width as usize;
+    if height == 0 || map_width == 0 { return; }
+
+    // Each Braille cell = 4 source lines vertically × 2 source columns horizontally
+    let lines_per_cell = 4usize;
+    // Scale: how many source lines each Braille dot-row represents
+    let total_dot_rows = height * lines_per_cell;
+    let scale = (total_lines as f64 / total_dot_rows as f64).max(1.0);
+    let col_scale = ((total_lines as f64 / height as f64) * 0.5).max(2.0) as usize;
+
+    let cursor_line = content.cursor().line;
+    let viewport_start = pane.viewport_offset;
+    let viewport_end = (viewport_start + height).min(total_lines);
+
+    let bg_normal = Color::Indexed(234);
+    let bg_viewport = Color::Indexed(236);
+
+    // Cache source lines to avoid repeated get_line calls
+    let mut line_cache: Vec<Option<Vec<char>>> = Vec::new();
+    let max_source = (height as f64 * lines_per_cell as f64 * scale) as usize + lines_per_cell;
+    for i in 0..max_source.min(total_lines) {
+        line_cache.push(content.get_line(i).map(|l| l.chars().collect()));
+    }
+
+    // Braille dot bit positions:
+    // col0: row0=0x01, row1=0x02, row2=0x04, row3=0x40
+    // col1: row0=0x08, row1=0x10, row2=0x20, row3=0x80
+    let dot_bits: [[u32; 4]; 2] = [
+        [0x01, 0x02, 0x04, 0x40], // left column dots
+        [0x08, 0x10, 0x20, 0x80], // right column dots
+    ];
+
+    let mut result_lines = Vec::with_capacity(height);
+
+    for row in 0..height {
+        let base_line = (row as f64 * lines_per_cell as f64 * scale) as usize;
+        let row_end = ((row + 1) as f64 * lines_per_cell as f64 * scale) as usize;
+
+        // Check viewport / cursor overlap
+        let in_viewport = base_line < viewport_end && row_end > viewport_start;
+        let has_cursor = cursor_line >= base_line && cursor_line < row_end;
+
+        let row_bg = if in_viewport { bg_viewport } else { bg_normal };
+        let row_fg = if has_cursor {
+            Color::Yellow
+        } else if in_viewport {
+            Color::Indexed(111) // bright blue
+        } else {
+            Color::Indexed(245) // medium gray
+        };
+
+        if base_line >= total_lines {
+            result_lines.push(Line::from(Span::styled(
+                " ".repeat(map_width),
+                Style::default().bg(bg_normal),
+            )));
+            continue;
+        }
+
+        let mut bar = String::with_capacity(map_width);
+
+        for col in 0..map_width {
+            let mut dots = 0u32;
+
+            for dx in 0..2usize {
+                for dy in 0..4usize {
+                    let src_line = base_line + (dy as f64 * scale) as usize;
+                    let src_col = col * col_scale + dx;
+
+                    if src_line < line_cache.len() {
+                        if let Some(ref chars) = line_cache[src_line] {
+                            if src_col < chars.len() && !chars[src_col].is_whitespace() {
+                                dots |= dot_bits[dx][dy];
+                            }
+                        }
+                    }
+                }
+            }
+
+            if dots == 0 {
+                bar.push(' ');
+            } else {
+                bar.push(char::from_u32(0x2800 + dots).unwrap_or(' '));
+            }
+        }
+
+        result_lines.push(Line::from(Span::styled(
+            bar,
+            Style::default().fg(row_fg).bg(row_bg),
+        )));
+    }
+
+    let widget = Paragraph::new(result_lines);
+    f.render_widget(widget, area);
+}
+
+/// Render the symbol outline sidebar.
+pub(super) fn render_outline_sidebar(f: &mut ratatui::Frame, area: Rect, state: &EditorState) {
+    let outline = &state.outline;
+    let available_height = area.height.saturating_sub(2) as usize;
+    let mut lines = Vec::with_capacity(available_height);
+
+    // Scroll to keep selected visible
+    let scroll_offset = if outline.selected >= available_height {
+        outline.selected - available_height + 1
+    } else {
+        0
+    };
+
+    for i in 0..available_height {
+        let idx = scroll_offset + i;
+        if idx >= outline.symbols.len() { break; }
+        let sym = &outline.symbols[idx];
+        let is_selected = idx == outline.selected;
+        let indent = "  ".repeat(sym.depth);
+        let icon = match sym.kind {
+            novim_core::highlight::SymbolKind::Function | novim_core::highlight::SymbolKind::Method => "ƒ ",
+            novim_core::highlight::SymbolKind::Struct | novim_core::highlight::SymbolKind::Class => "◆ ",
+            novim_core::highlight::SymbolKind::Enum => "◇ ",
+            novim_core::highlight::SymbolKind::Interface => "◈ ",
+            novim_core::highlight::SymbolKind::Module => "▸ ",
+            novim_core::highlight::SymbolKind::Constant => "● ",
+        };
+        let text = format!("{}{}{}", indent, icon, sym.name);
+
+        let style = if is_selected {
+            Style::default().bg(Color::DarkGray).fg(Color::White)
+        } else {
+            match sym.kind {
+                novim_core::highlight::SymbolKind::Function | novim_core::highlight::SymbolKind::Method => {
+                    Style::default().fg(Color::Indexed(75)) // blue
+                }
+                novim_core::highlight::SymbolKind::Struct | novim_core::highlight::SymbolKind::Class => {
+                    Style::default().fg(Color::Indexed(180)) // gold
+                }
+                novim_core::highlight::SymbolKind::Enum => {
+                    Style::default().fg(Color::Indexed(176)) // purple
+                }
+                novim_core::highlight::SymbolKind::Interface => {
+                    Style::default().fg(Color::Indexed(114)) // green
+                }
+                novim_core::highlight::SymbolKind::Module => {
+                    Style::default().fg(Color::Indexed(252)) // light gray
+                }
+                novim_core::highlight::SymbolKind::Constant => {
+                    Style::default().fg(Color::Indexed(117)) // teal
+                }
+            }
+        };
+
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+
+    let widget = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Outline ")
+            .border_style(Style::default().fg(Color::Indexed(240))),
+    );
+    f.render_widget(widget, area);
 }
 
 /// Render the file explorer sidebar.

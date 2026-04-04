@@ -30,6 +30,67 @@ pub enum ExecOutcome {
     Quit,
 }
 
+/// Pre-computed status bar content shared between TUI and GUI renderers.
+pub struct StatusBarInfo {
+    /// Display name for current mode (e.g. "NORMAL", "INSERT", "REC @a", "CTRL+W...", "TERMINAL").
+    pub mode_name: String,
+    /// Diagnostics summary (e.g. " 2E 1W") or empty string.
+    pub diag_summary: String,
+    /// LSP status (e.g. " LSP:rust") or empty string.
+    pub lsp_status: String,
+    /// Pane info (e.g. " [pane 1/3]") or empty string.
+    pub pane_info: String,
+    /// Git branch (e.g. " main") or empty string.
+    pub git_branch: String,
+    /// Cursor line (1-based).
+    pub cursor_line: usize,
+    /// Cursor column (1-based).
+    pub cursor_col: usize,
+    /// Total lines in the buffer.
+    pub total_lines: usize,
+    /// Status message if any.
+    pub status_message: Option<String>,
+    /// Current file name.
+    pub file_name: String,
+    /// Whether the buffer has unsaved changes.
+    pub is_dirty: bool,
+}
+
+impl StatusBarInfo {
+    /// Format the left side of the status bar using a template string.
+    /// Placeholders: {mode}, {message}, {diag}, {pane}, {file}, {modified}
+    pub fn format_left(&self, template: &str) -> String {
+        let msg = self.status_message.as_deref().unwrap_or("");
+        let msg_section = if msg.is_empty() {
+            String::new()
+        } else {
+            msg.to_string()
+        };
+        template
+            .replace("{mode}", &self.mode_name)
+            .replace("{message}", &msg_section)
+            .replace("{diag}", &self.diag_summary)
+            .replace("{pane}", &self.pane_info)
+            .replace("{file}", &self.file_name)
+            .replace("{modified}", if self.is_dirty { "[+]" } else { "" })
+    }
+
+    /// Format the right side of the status bar using a template string.
+    /// Placeholders: {lsp}, {branch}, {line}, {col}, {total}, {percent}
+    pub fn format_right(&self, template: &str) -> String {
+        let pct = if self.total_lines > 0 {
+            self.cursor_line * 100 / self.total_lines
+        } else { 0 };
+        template
+            .replace("{lsp}", &self.lsp_status)
+            .replace("{branch}", &self.git_branch)
+            .replace("{line}", &self.cursor_line.to_string())
+            .replace("{col}", &self.cursor_col.to_string())
+            .replace("{total}", &self.total_lines.to_string())
+            .replace("{percent}", &format!("{}%", pct))
+    }
+}
+
 /// Line number display mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineNumberMode {
@@ -43,15 +104,6 @@ pub enum LineNumberMode {
     Off,
 }
 
-/// Collected LSP events from polling, before applying to state.
-#[derive(Default)]
-pub struct LspPollResult {
-    pub diagnostics: Vec<(String, Vec<lsp::Diagnostic>)>,
-    pub goto: Option<(String, u32, u32)>,
-    pub hover: Option<String>,
-    pub completions: Option<Vec<lsp::CompletionItem>>,
-    pub status_messages: Vec<String>,
-}
 
 /// Search-related UI state.
 #[derive(Default)]
@@ -139,6 +191,103 @@ pub struct EditRecord {
     pub command: EditorCommand,
     /// Text typed during insert mode (for change commands).
     pub insert_text: Vec<EditorCommand>,
+}
+
+/// Tab completion state for `:` command mode.
+#[derive(Default)]
+pub struct CommandCompletionState {
+    /// Completion candidates for the current word.
+    pub candidates: Vec<String>,
+    /// Currently selected candidate index.
+    pub selected: usize,
+    /// The original text before completion started (to restore on cancel).
+    pub original: String,
+    /// Whether completion is active.
+    pub active: bool,
+}
+
+/// A single quickfix entry (file:line:col: message).
+#[derive(Debug, Clone)]
+pub struct QuickfixEntry {
+    pub file: String,
+    pub line: usize,
+    pub col: usize,
+    pub message: String,
+}
+
+/// Quickfix list state.
+#[derive(Default)]
+pub struct QuickfixState {
+    pub entries: Vec<QuickfixEntry>,
+    pub current: usize,
+    pub visible: bool,
+}
+
+/// Command history window state.
+#[derive(Default)]
+pub struct CommandWindowState {
+    pub visible: bool,
+    pub selected: usize,
+}
+
+/// Symbol list popup state.
+pub struct SymbolListState {
+    pub visible: bool,
+    pub symbols: Vec<crate::highlight::SymbolInfo>,
+    pub filtered: Vec<usize>,  // indices into symbols
+    pub selected: usize,
+    pub query: String,
+}
+
+impl Default for SymbolListState {
+    fn default() -> Self {
+        Self { visible: false, symbols: Vec::new(), filtered: Vec::new(), selected: 0, query: String::new() }
+    }
+}
+
+impl SymbolListState {
+    pub fn filter(&mut self) {
+        let q = self.query.to_lowercase();
+        self.filtered = self.symbols.iter().enumerate()
+            .filter(|(_, s)| q.is_empty() || s.name.to_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect();
+        self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+    }
+}
+
+/// Symbol outline sidebar state.
+pub struct OutlineState {
+    pub visible: bool,
+    pub symbols: Vec<crate::highlight::SymbolInfo>,
+    pub selected: usize,
+    /// Cached breadcrumb string for the status/header area.
+    pub breadcrumb: String,
+}
+
+impl Default for OutlineState {
+    fn default() -> Self {
+        Self { visible: false, symbols: Vec::new(), selected: 0, breadcrumb: String::new() }
+    }
+}
+
+/// A floating window displayed on top of the editor.
+pub struct FloatingWindow {
+    pub title: String,
+    pub lines: Vec<String>,
+    pub width: u16,
+    pub height: u16,
+    pub scroll: usize,
+    pub selected: usize,
+}
+
+impl CommandCompletionState {
+    pub fn reset(&mut self) {
+        self.candidates.clear();
+        self.selected = 0;
+        self.original.clear();
+        self.active = false;
+    }
 }
 
 pub(super) fn ln_mode_from_config(s: &str) -> LineNumberMode {

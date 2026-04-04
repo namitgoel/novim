@@ -249,6 +249,8 @@ pub enum EditorCommand {
     DeleteTextObject(TextObjectModifier, TextObjectKind),
     /// Change a text object (e.g., ciw, ci", ca()
     ChangeTextObject(TextObjectModifier, TextObjectKind),
+    /// Yank a text object without deleting (e.g., yiw, yi")
+    YankTextObject(TextObjectModifier, TextObjectKind),
     /// Display a message in the status bar.
     Echo(String),
     /// List all loaded plugins.
@@ -347,6 +349,10 @@ pub enum EditorCommand {
     CommandHistoryUp,
     /// Down arrow in command mode — recall next command
     CommandHistoryDown,
+    /// Tab in command mode — complete current word
+    CommandTab,
+    /// Shift+Tab in command mode — complete backward
+    CommandTabBack,
 
     // Shell execution
     /// :! — run a shell command
@@ -392,6 +398,99 @@ pub enum EditorCommand {
     /// gk — move up one display/screen line
     DisplayLineUp,
 
+    /// Y — yank to end of line (like y$)
+    YankToEnd,
+    /// Ctrl+E — scroll viewport down one line (cursor stays)
+    ScrollLineDown,
+    /// Ctrl+Y — scroll viewport up one line (cursor stays)
+    ScrollLineUp,
+    /// H — move cursor to top of visible screen
+    ScreenTop,
+    /// M — move cursor to middle of visible screen
+    ScreenMiddle,
+    /// L — move cursor to bottom of visible screen
+    ScreenBottom,
+    /// '' — jump to position before last jump
+    JumpToLastPosition,
+    /// :cd / :lcd — change working directory
+    ChangeDirectory(String),
+    /// Ctrl+G — show file info in status bar
+    FileInfo,
+    /// Indent selected lines in visual mode
+    VisualIndent,
+    /// Dedent selected lines in visual mode
+    VisualDedent,
+    /// Toggle case on visual selection
+    VisualToggleCase,
+    /// Uppercase visual selection
+    VisualUpperCase,
+    /// Lowercase visual selection
+    VisualLowerCase,
+
+    /// Ctrl+A — increment number at/after cursor
+    IncrementNumber,
+    /// Ctrl+X — decrement number at/after cursor
+    DecrementNumber,
+    /// gU + motion — uppercase with motion
+    UpperCaseMotion(Direction, usize),
+    /// gu + motion — lowercase with motion
+    LowerCaseMotion(Direction, usize),
+    /// gUU / guu — uppercase/lowercase whole line
+    UpperCaseLine,
+    LowerCaseLine,
+    /// :read — insert file or command output below cursor
+    ReadFile(String),
+    ReadCommand(String),
+    /// :sort — sort lines
+    SortLines,
+    /// :w !cmd — pipe buffer to shell command
+    PipeToCommand(String),
+    /// == — auto-indent current line
+    AutoIndent,
+
+    /// gq + motion — format/wrap text
+    FormatMotion(Direction, usize),
+    /// gqq — format current line
+    FormatLine,
+    /// :copen — open quickfix list
+    QuickfixOpen,
+    /// :cnext / :cn — jump to next quickfix entry
+    QuickfixNext,
+    /// :cprev / :cp — jump to previous quickfix entry
+    QuickfixPrev,
+    /// :cclose / :ccl — close quickfix list
+    QuickfixClose,
+    /// :make — run build command and populate quickfix
+    Make(String),
+    /// q: — open command history window
+    OpenCommandWindow,
+    /// :symbols — list symbols in current file
+    SymbolList,
+    /// Navigate symbol list
+    SymbolUp,
+    SymbolDown,
+    SymbolAccept,
+    SymbolDismiss,
+    SymbolInput(char),
+    SymbolBackspace,
+    /// Open/close a floating window (plugin API)
+    OpenFloat { title: String, lines: Vec<String>, width: u16, height: u16 },
+    CloseFloat,
+    /// :blame / :Gblame — toggle inline git blame
+    ToggleBlame,
+    /// :diff / :Gdiff — open side-by-side diff vs HEAD
+    GitDiff,
+    /// :PlugInstall <url> — install a plugin from a git URL
+    PluginInstall(String),
+    /// :PlugUpdate [name] — update installed plugins (or a specific one)
+    PluginUpdate(String),
+    /// :PlugRemove <name> — remove an installed plugin
+    PluginRemove(String),
+    /// Toggle minimap
+    ToggleMinimap,
+    /// Toggle symbol outline sidebar
+    ToggleOutline,
+
     Noop,
 }
 
@@ -427,14 +526,19 @@ pub enum InputState {
     /// Waiting for second > or < (for >> or <<)
     /// true = indent (>), false = dedent (<)
     WaitingIndent(bool),
+    /// Waiting for second = (for ==)
+    WaitingAutoIndent,
 }
 
-/// Pending operator (d = delete, c = change, y = yank)
+/// Pending operator (d = delete, c = change, y = yank, gU = uppercase, gu = lowercase)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operator {
     Delete,
     Change,
     Yank,
+    UpperCase,
+    LowerCase,
+    Format,
 }
 
 /// Text object modifier: inner (i) vs around (a).
@@ -468,6 +572,7 @@ pub fn key_to_command(
     in_terminal: bool,
     popup_showing: bool,
     gui_mode: bool,
+    is_macro_recording: bool,
 ) -> (EditorCommand, InputState) {
     // When a popup is showing, Esc/q/? dismiss it, everything else is ignored
     if popup_showing {
@@ -504,6 +609,12 @@ pub fn key_to_command(
             KeyCode::Char('v') => (EditorCommand::ReselectVisual, InputState::Ready),
             KeyCode::Char('j') => (EditorCommand::DisplayLineDown, InputState::Ready),
             KeyCode::Char('k') => (EditorCommand::DisplayLineUp, InputState::Ready),
+            // gU — uppercase operator (waits for motion)
+            KeyCode::Char('U') => (EditorCommand::Noop, InputState::WaitingOperatorMotion(Operator::UpperCase)),
+            // gu — lowercase operator (waits for motion)
+            KeyCode::Char('u') => (EditorCommand::Noop, InputState::WaitingOperatorMotion(Operator::LowerCase)),
+            // gq — format text operator (waits for motion)
+            KeyCode::Char('q') => (EditorCommand::Noop, InputState::WaitingOperatorMotion(Operator::Format)),
             _ => (EditorCommand::Noop, InputState::Ready),
         };
     }
@@ -529,6 +640,8 @@ pub fn key_to_command(
 
     if let InputState::WaitingMarkJump(exact) = input_state {
         return match key.code {
+            // '' or `` — jump to position before last jump
+            KeyCode::Char('\'') | KeyCode::Char('`') => (EditorCommand::JumpToLastPosition, InputState::Ready),
             KeyCode::Char(c) if c.is_ascii_lowercase() => (EditorCommand::JumpToMark(c, exact), InputState::Ready),
             _ => (EditorCommand::Noop, InputState::Ready),
         };
@@ -573,6 +686,14 @@ pub fn key_to_command(
             KeyCode::Char('>') if is_indent => (EditorCommand::Indent(1), InputState::Ready),
             KeyCode::Char('<') if !is_indent => (EditorCommand::Dedent(1), InputState::Ready),
             KeyCode::Esc => (EditorCommand::Noop, InputState::Ready),
+            _ => (EditorCommand::Noop, InputState::Ready),
+        };
+    }
+
+    // Handle WaitingAutoIndent state (==)
+    if input_state == InputState::WaitingAutoIndent {
+        return match key.code {
+            KeyCode::Char('=') => (EditorCommand::AutoIndent, InputState::Ready),
             _ => (EditorCommand::Noop, InputState::Ready),
         };
     }
@@ -638,7 +759,9 @@ pub fn key_to_command(
                 let cmd = match op {
                     Operator::Delete => EditorCommand::DeleteTextObject(modifier, k),
                     Operator::Change => EditorCommand::ChangeTextObject(modifier, k),
-                    Operator::Yank => EditorCommand::DeleteTextObject(modifier, k), // TODO: yank text object without delete
+                    Operator::Yank => EditorCommand::YankTextObject(modifier, k),
+                    // gU/gu/gq + text object: not yet implemented, treat as noop
+                    Operator::UpperCase | Operator::LowerCase | Operator::Format => EditorCommand::Noop,
                 };
                 (cmd, InputState::Ready)
             }
@@ -649,6 +772,7 @@ pub fn key_to_command(
     // Handle macro register selection
     if input_state == InputState::WaitingMacroRegister {
         return match key.code {
+            KeyCode::Char(':') => (EditorCommand::OpenCommandWindow, InputState::Ready),
             KeyCode::Char(c) if c.is_ascii_lowercase() => {
                 (EditorCommand::StartMacroRecord(c), InputState::Ready)
             }
@@ -681,7 +805,13 @@ pub fn key_to_command(
     }
 
     match mode {
-        EditorMode::Normal => normal_mode_command(key),
+        EditorMode::Normal => {
+            // When macro is recording, q/Q stops recording instead of entering WaitingMacroRegister
+            if is_macro_recording && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
+                return (EditorCommand::StopMacroRecord, InputState::Ready);
+            }
+            normal_mode_command(key)
+        }
         EditorMode::Insert => (insert_mode_command(key), InputState::Ready),
         EditorMode::Replace => (replace_mode_command(key), InputState::Ready),
         EditorMode::Visual | EditorMode::VisualBlock => (visual_mode_command(key), InputState::Ready),
@@ -750,6 +880,28 @@ fn normal_mode_command(key: KeyEvent) -> (EditorCommand, InputState) {
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             (EditorCommand::ScrollDown, InputState::Ready)
         }
+        // Scroll one line: Ctrl+E down, Ctrl+Y up (viewport only, cursor stays)
+        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            (EditorCommand::ScrollLineDown, InputState::Ready)
+        }
+        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            (EditorCommand::ScrollLineUp, InputState::Ready)
+        }
+        // Symbol list: Ctrl+T
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            (EditorCommand::SymbolList, InputState::Ready)
+        }
+        // Increment / decrement number
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            (EditorCommand::IncrementNumber, InputState::Ready)
+        }
+        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            (EditorCommand::DecrementNumber, InputState::Ready)
+        }
+        // File info: Ctrl+G
+        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            (EditorCommand::FileInfo, InputState::Ready)
+        }
         // Full page scroll: Ctrl+B (page up), PageUp/PageDown keys
         KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             (EditorCommand::PageUp, InputState::Ready)
@@ -797,9 +949,9 @@ fn normal_mode_command(key: KeyEvent) -> (EditorCommand, InputState) {
         KeyCode::Char('"') => (EditorCommand::Noop, InputState::WaitingRegister),
         // q: stop macro recording if active, otherwise noop.
         // Use :q or Cmd+Q to quit the editor.
-        KeyCode::Char('q') => (EditorCommand::StopMacroRecord, InputState::Ready),
-        // Macro: Q starts recording (shifted to avoid quit conflict)
-        KeyCode::Char('Q') => (EditorCommand::Noop, InputState::WaitingMacroRegister),
+        // q: stop recording if active, otherwise enter macro register / command window state
+        // q + letter → start recording, q + : → command window
+        KeyCode::Char('q') | KeyCode::Char('Q') => (EditorCommand::Noop, InputState::WaitingMacroRegister),
         KeyCode::Char('@') => (EditorCommand::Noop, InputState::WaitingReplayRegister),
         KeyCode::Char('i') => (
             EditorCommand::SwitchMode(EditorMode::Insert),
@@ -825,6 +977,12 @@ fn normal_mode_command(key: KeyEvent) -> (EditorCommand, InputState) {
         KeyCode::Char('0') => (EditorCommand::MoveCursor(Direction::LineStart), InputState::Ready),
         KeyCode::Char('$') => (EditorCommand::MoveCursor(Direction::LineEnd), InputState::Ready),
         KeyCode::Char('G') => (EditorCommand::MoveCursor(Direction::FileEnd), InputState::Ready),
+        // Screen position jumps
+        KeyCode::Char('H') => (EditorCommand::ScreenTop, InputState::Ready),
+        KeyCode::Char('M') => (EditorCommand::ScreenMiddle, InputState::Ready),
+        KeyCode::Char('L') => (EditorCommand::ScreenBottom, InputState::Ready),
+        // Y — yank to end of line (neovim behavior)
+        KeyCode::Char('Y') => (EditorCommand::YankToEnd, InputState::Ready),
         // Marks
         KeyCode::Char('m') => (EditorCommand::Noop, InputState::WaitingMarkSet),
         KeyCode::Char('\'') => (EditorCommand::Noop, InputState::WaitingMarkJump(false)),
@@ -873,6 +1031,8 @@ fn normal_mode_command(key: KeyEvent) -> (EditorCommand, InputState) {
         // Paragraph motions
         KeyCode::Char('{') => (EditorCommand::MoveCursor(Direction::ParagraphBackward), InputState::Ready),
         KeyCode::Char('}') => (EditorCommand::MoveCursor(Direction::ParagraphForward), InputState::Ready),
+        // Auto-indent
+        KeyCode::Char('=') => (EditorCommand::Noop, InputState::WaitingAutoIndent),
         // Match bracket
         KeyCode::Char('%') => (EditorCommand::MatchBracket, InputState::Ready),
         _ => (EditorCommand::Noop, InputState::Ready),
@@ -923,6 +1083,9 @@ fn operator_motion_command(key: KeyEvent, op: Operator) -> EditorCommand {
             Operator::Delete => EditorCommand::DeleteMotion(dir, 1),
             Operator::Change => EditorCommand::ChangeMotion(dir, 1),
             Operator::Yank => EditorCommand::YankMotion(dir, 1),
+            Operator::UpperCase => EditorCommand::UpperCaseMotion(dir, 1),
+            Operator::LowerCase => EditorCommand::LowerCaseMotion(dir, 1),
+            Operator::Format => EditorCommand::FormatMotion(dir, 1),
         }
     };
     match key.code {
@@ -939,6 +1102,10 @@ fn operator_motion_command(key: KeyEvent, op: Operator) -> EditorCommand {
         KeyCode::Char('d') if op == Operator::Delete => EditorCommand::DeleteLines(1),
         KeyCode::Char('c') if op == Operator::Change => EditorCommand::ChangeLines(1),
         KeyCode::Char('y') if op == Operator::Yank => EditorCommand::YankLines(1),
+        // gUU = uppercase line, guu = lowercase line, gqq = format line
+        KeyCode::Char('U') if op == Operator::UpperCase => EditorCommand::UpperCaseLine,
+        KeyCode::Char('u') if op == Operator::LowerCase => EditorCommand::LowerCaseLine,
+        KeyCode::Char('q') if op == Operator::Format => EditorCommand::FormatLine,
         _ => EditorCommand::Noop,
     }
 }
@@ -1001,6 +1168,13 @@ fn visual_mode_command(key: KeyEvent) -> EditorCommand {
         // Actions on selection
         KeyCode::Char('d') | KeyCode::Char('x') => EditorCommand::DeleteSelection,
         KeyCode::Char('y') => EditorCommand::YankSelection,
+        // Indent / dedent selection
+        KeyCode::Char('>') => EditorCommand::VisualIndent,
+        KeyCode::Char('<') => EditorCommand::VisualDedent,
+        // Case operations on selection
+        KeyCode::Char('~') => EditorCommand::VisualToggleCase,
+        KeyCode::Char('U') => EditorCommand::VisualUpperCase,
+        KeyCode::Char('u') => EditorCommand::VisualLowerCase,
         _ => EditorCommand::Noop,
     }
 }
@@ -1012,12 +1186,138 @@ fn command_mode_command(key: KeyEvent) -> EditorCommand {
         KeyCode::Backspace => EditorCommand::CommandBackspace,
         KeyCode::Up => EditorCommand::CommandHistoryUp,
         KeyCode::Down => EditorCommand::CommandHistoryDown,
+        KeyCode::Tab => EditorCommand::CommandTab,
+        KeyCode::BackTab => EditorCommand::CommandTabBack,
         KeyCode::Char(c) => EditorCommand::CommandInput(c),
         _ => EditorCommand::Noop,
     }
 }
 
+/// Single source of truth for built-in ex-commands.
+/// Each entry: (list of name aliases, parser function).
+/// `parse_ex_command` looks up by name and calls the parser.
+/// `known_commands` flattens the names for tab completion.
+type CmdParser = fn(&str) -> EditorCommand;
+
+static BUILTIN_COMMANDS: &[(&[&str], CmdParser)] = &[
+    (&["w"],                    |args| {
+        if let Some(cmd) = args.strip_prefix('!') {
+            EditorCommand::PipeToCommand(cmd.trim().to_string())
+        } else {
+            EditorCommand::Save
+        }
+    }),
+    (&["q"],                    |_| EditorCommand::Quit),
+    (&["q!"],                   |_| EditorCommand::ForceQuit),
+    (&["wq", "x"],              |_| EditorCommand::SaveAndQuit),
+    (&["split", "sp"],          |_| EditorCommand::SplitPane(SplitDirection::Horizontal)),
+    (&["vsplit", "vs"],         |_| EditorCommand::SplitPane(SplitDirection::Vertical)),
+    (&["terminal", "term"],     |_| EditorCommand::OpenTerminal),
+    (&["e", "edit"],            |args| {
+        if args.is_empty() { EditorCommand::Noop }
+        else { EditorCommand::EditFile(args.to_string()) }
+    }),
+    (&["mksession"],            |args| {
+        let name = if args.is_empty() { "default" } else { args };
+        EditorCommand::SaveSession(name.to_string())
+    }),
+    (&["close"],                |_| EditorCommand::ClosePane),
+    (&["bnext", "bn"],          |_| EditorCommand::BufferNext),
+    (&["bprev", "bp"],          |_| EditorCommand::BufferPrev),
+    (&["ls", "buffers"],        |_| EditorCommand::BufferList),
+    (&["find", "Files"],        |args| {
+        if args.is_empty() { EditorCommand::OpenFileFinder }
+        else { EditorCommand::OpenFinderAt(args.to_string()) }
+    }),
+    (&["tabnew", "tabe"],       |args| {
+        let dir = if args.is_empty() { "." } else { args };
+        EditorCommand::OpenTab(dir.to_string())
+    }),
+    (&["tabn", "tabnext"],      |_| EditorCommand::NextTab),
+    (&["tabp", "tabprev"],      |_| EditorCommand::PrevTab),
+    (&["tabclose", "tabc"],     |_| EditorCommand::CloseTab),
+    (&["tabs", "workspaces"],   |_| EditorCommand::ListWorkspaces),
+    (&["tabrename"],            |args| {
+        if args.is_empty() { EditorCommand::Noop }
+        else { EditorCommand::RenameTab(args.to_string()) }
+    }),
+    (&["cd", "lcd", "chdir"],   |args| {
+        let dir = if args.is_empty() {
+            std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+        } else if let Some(rest) = args.strip_prefix("~/") {
+            let home = std::env::var("HOME").unwrap_or_default();
+            format!("{}/{}", home, rest)
+        } else {
+            args.to_string()
+        };
+        EditorCommand::ChangeDirectory(dir)
+    }),
+    (&["read", "r"],            |args| {
+        if let Some(cmd) = args.strip_prefix('!') {
+            EditorCommand::ReadCommand(cmd.trim().to_string())
+        } else if !args.is_empty() {
+            EditorCommand::ReadFile(args.to_string())
+        } else {
+            EditorCommand::Noop
+        }
+    }),
+    (&["sort"],                 |_| EditorCommand::SortLines),
+    (&["marks"],                |_| EditorCommand::ListMarks),
+    (&["registers", "reg"],     |_| EditorCommand::ListRegisters),
+    (&["noh", "nohlsearch"],    |_| EditorCommand::ClearSearch),
+    (&["definition", "def"],    |_| EditorCommand::GotoDefinition),
+    (&["explore", "Explore", "Ex"], |args| {
+        if args.is_empty() { EditorCommand::ToggleExplorer }
+        else { EditorCommand::OpenExplorer(args.to_string()) }
+    }),
+    (&["undo"],                 |_| EditorCommand::Undo),
+    (&["redo"],                 |_| EditorCommand::Redo),
+    (&["help", "h"],            |_| EditorCommand::ToggleHelp),
+    (&["echo"],                 |args| EditorCommand::Echo(args.to_string())),
+    (&["PluginList", "pluginlist", "plugins"], |_| EditorCommand::PluginList),
+    (&["source", "so"],         |args| {
+        if args.is_empty() { EditorCommand::Noop }
+        else { EditorCommand::SourceFile(args.to_string()) }
+    }),
+    (&["set"],                  |args| {
+        if args.is_empty() { EditorCommand::Noop }
+        else { EditorCommand::SetOption(args.to_string()) }
+    }),
+    (&["copen", "cope"],        |_| EditorCommand::QuickfixOpen),
+    (&["cnext", "cn"],          |_| EditorCommand::QuickfixNext),
+    (&["cprev", "cp", "cN"],    |_| EditorCommand::QuickfixPrev),
+    (&["cclose", "ccl"],        |_| EditorCommand::QuickfixClose),
+    (&["symbols", "Symbols"],   |_| EditorCommand::SymbolList),
+    (&["blame", "Gblame"],      |_| EditorCommand::ToggleBlame),
+    (&["minimap"],              |_| EditorCommand::ToggleMinimap),
+    (&["outline", "Outline"],   |_| EditorCommand::ToggleOutline),
+    (&["diff", "Gdiff"],        |_| EditorCommand::GitDiff),
+    (&["PlugInstall"],          |args| {
+        if args.is_empty() { EditorCommand::Noop }
+        else { EditorCommand::PluginInstall(args.to_string()) }
+    }),
+    (&["PlugUpdate"],           |args| EditorCommand::PluginUpdate(args.to_string())),
+    (&["PlugRemove"],           |args| {
+        if args.is_empty() { EditorCommand::Noop }
+        else { EditorCommand::PluginRemove(args.to_string()) }
+    }),
+    (&["make"],                 |args| {
+        let cmd = if args.is_empty() { "make" } else { args };
+        EditorCommand::Make(cmd.to_string())
+    }),
+];
+
+/// All built-in ex-command names (for tab completion).
+/// Derived from the single-source-of-truth `BUILTIN_COMMANDS` table.
+pub fn known_commands() -> Vec<&'static str> {
+    BUILTIN_COMMANDS.iter()
+        .flat_map(|(names, _)| names.iter().copied())
+        .collect()
+}
+
 /// Parse and convert an ex-command string into an EditorCommand.
+/// Looks up the command name in `BUILTIN_COMMANDS`; falls through to
+/// range/substitution parsing and plugin commands if not found.
 pub fn parse_ex_command(input: &str) -> EditorCommand {
     let input = input.trim();
 
@@ -1031,112 +1331,39 @@ pub fn parse_ex_command(input: &str) -> EditorCommand {
         None => (input, ""),
     };
 
-    match cmd {
-        "w" => EditorCommand::Save,
-        "q" => EditorCommand::Quit,
-        "q!" => EditorCommand::ForceQuit,
-        "wq" | "x" => EditorCommand::SaveAndQuit,
-        "split" | "sp" => EditorCommand::SplitPane(SplitDirection::Horizontal),
-        "vsplit" | "vs" => EditorCommand::SplitPane(SplitDirection::Vertical),
-        "terminal" | "term" => EditorCommand::OpenTerminal,
-        "e" | "edit" => {
-            if args.is_empty() {
-                EditorCommand::Noop
-            } else {
-                EditorCommand::EditFile(args.to_string())
-            }
-        }
-        "mksession" => {
-            let name = if args.is_empty() { "default" } else { args };
-            EditorCommand::SaveSession(name.to_string())
-        }
-        "close" => EditorCommand::ClosePane,
-        "bnext" | "bn" => EditorCommand::BufferNext,
-        "bprev" | "bp" => EditorCommand::BufferPrev,
-        "ls" | "buffers" => EditorCommand::BufferList,
-        "find" | "Files" => {
-            if args.is_empty() {
-                EditorCommand::OpenFileFinder
-            } else {
-                EditorCommand::OpenFinderAt(args.to_string())
-            }
-        }
-        "tabnew" | "tabe" => {
-            let dir = if args.is_empty() { "." } else { args };
-            EditorCommand::OpenTab(dir.to_string())
-        }
-        "tabn" | "tabnext" => EditorCommand::NextTab,
-        "tabp" | "tabprev" => EditorCommand::PrevTab,
-        "tabclose" | "tabc" => EditorCommand::CloseTab,
-        "tabs" | "workspaces" => EditorCommand::ListWorkspaces,
-        "tabrename" => {
-            if args.is_empty() {
-                EditorCommand::Noop
-            } else {
-                EditorCommand::RenameTab(args.to_string())
-            }
-        }
-        "marks" => EditorCommand::ListMarks,
-        "registers" | "reg" => EditorCommand::ListRegisters,
-        "noh" | "nohlsearch" => EditorCommand::ClearSearch,
-        "definition" | "def" => EditorCommand::GotoDefinition,
-        "explore" | "Explore" | "Ex" => {
-            if args.is_empty() {
-                EditorCommand::ToggleExplorer
-            } else {
-                EditorCommand::OpenExplorer(args.to_string())
-            }
-        }
-        "undo" => EditorCommand::Undo,
-        "redo" => EditorCommand::Redo,
-        "help" | "h" => EditorCommand::ToggleHelp,
-        "echo" => EditorCommand::Echo(args.to_string()),
-        "PluginList" | "pluginlist" | "plugins" => EditorCommand::PluginList,
-        "source" | "so" => {
-            if args.is_empty() {
-                EditorCommand::Noop
-            } else {
-                EditorCommand::SourceFile(args.to_string())
-            }
-        }
-        "set" => {
-            if args.is_empty() {
-                EditorCommand::Noop
-            } else {
-                EditorCommand::SetOption(args.to_string())
-            }
-        }
-        _ => {
-            // Parse range prefix: "5,10", "%", or nothing
-            let (range, rest) = parse_range(input);
-
-            // Handle s/pattern/replacement/[flags]
-            if let Some(sub_rest) = rest.strip_prefix("s/") {
-                let parts: Vec<&str> = sub_rest.splitn(3, '/').collect();
-                if parts.len() >= 2 {
-                    let pattern = parts[0].to_string();
-                    let replacement = parts.get(1).unwrap_or(&"").to_string();
-                    let flags = parts.get(2).unwrap_or(&"");
-                    let case_insensitive = flags.contains('i');
-                    let confirm = flags.contains('c');
-                    if confirm {
-                        return EditorCommand::ReplaceConfirm(pattern, replacement, case_insensitive);
-                    }
-                    return EditorCommand::ReplaceAll(pattern, replacement, case_insensitive);
-                    // TODO: use range and case_insensitive when ReplaceRange is implemented
-                }
-            }
-
-            // Handle range + d (e.g., 5,10d)
-            if rest == "d" {
-                if let Some((start, end)) = range {
-                    return EditorCommand::DeleteLines(end.saturating_sub(start) + 1);
-                    // TODO: proper range delete that moves cursor to start first
-                }
-            }
-
-            // Fall through to plugin registry for unknown commands
-            EditorCommand::PluginCommand(cmd.to_string(), args.to_string())
+    // Look up in the data-driven command table
+    for (names, parser) in BUILTIN_COMMANDS {
+        if names.contains(&cmd) {
+            return parser(args);
         }
     }
+
+    // Fallthrough: range commands, substitution, plugin commands
+    let (range, rest) = parse_range(input);
+
+    // Handle s/pattern/replacement/[flags]
+    if let Some(sub_rest) = rest.strip_prefix("s/") {
+        let parts: Vec<&str> = sub_rest.splitn(3, '/').collect();
+        if parts.len() >= 2 {
+            let pattern = parts[0].to_string();
+            let replacement = parts.get(1).unwrap_or(&"").to_string();
+            let flags = parts.get(2).unwrap_or(&"");
+            let case_insensitive = flags.contains('i');
+            let confirm = flags.contains('c');
+            if confirm {
+                return EditorCommand::ReplaceConfirm(pattern, replacement, case_insensitive);
+            }
+            return EditorCommand::ReplaceAll(pattern, replacement, case_insensitive);
+        }
+    }
+
+    // Handle range + d (e.g., 5,10d)
+    if rest == "d" {
+        if let Some((start, end)) = range {
+            return EditorCommand::DeleteLines(end.saturating_sub(start) + 1);
+        }
+    }
+
+    // Fall through to plugin registry for unknown commands
+    EditorCommand::PluginCommand(cmd.to_string(), args.to_string())
 }

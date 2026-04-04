@@ -3,7 +3,6 @@
 use glyphon::Color;
 use novim_core::config::SyntaxTheme;
 use novim_core::editor::{EditorState, LineNumberMode};
-use novim_core::pane::PaneContent;
 use novim_core::text_utils::{expand_tabs, display_col};
 use novim_core::welcome;
 use novim_types::EditorMode;
@@ -326,70 +325,16 @@ pub(super) fn render_tab_bar(editor: &EditorState, cols: usize) -> Vec<RichSpan>
 // ── Status bar ────────────────────────────────────────────────────────────────
 
 pub(super) fn render_status_bar(editor: &EditorState, cols: usize) -> Vec<RichSpan> {
-    let idx = editor.active_tab;
-    let ws = &editor.tabs[idx];
-    let pane = ws.panes.focused_pane();
-    let buf = pane.content.as_buffer_like();
-    let cursor = buf.cursor();
-    let total = buf.len_lines();
-    let pane_count = ws.panes.pane_count();
+    let info = editor.status_bar_info();
+    let sb_config = &editor.config.status_bar;
 
-    // LSP status
-    let lsp_status = if !ws.lsp_clients.is_empty() {
-        let langs: Vec<&str> = ws.lsp_clients.keys().map(|s| s.as_str()).collect();
-        format!(" LSP:{}", langs.join(","))
-    } else {
-        String::new()
-    };
-
-    // Diagnostics summary
-    let diag_summary = {
-        let uri = match &pane.content {
-            PaneContent::Editor(b) => b.file_uri(),
-            _ => None,
-        };
-        if let Some(diags) = uri.and_then(|u| ws.diagnostics.get(&u)) {
-            let errors = diags.iter().filter(|d| d.severity == novim_core::lsp::DiagnosticSeverity::Error).count();
-            let warnings = diags.iter().filter(|d| d.severity == novim_core::lsp::DiagnosticSeverity::Warning).count();
-            if errors > 0 || warnings > 0 {
-                format!(" {}E {}W", errors, warnings)
-            } else { String::new() }
-        } else { String::new() }
-    };
-
-    let mode_name = if let Some(reg) = editor.macros.recording {
-        format!("REC @{}", reg)
-    } else if editor.input_state == novim_core::input::InputState::WaitingPaneCommand {
-        "CTRL+W...".to_string()
-    } else if buf.is_terminal() {
-        "TERMINAL".to_string()
-    } else {
-        editor.mode.display_name().to_string()
-    };
-
-    let pane_info = if pane_count > 1 {
-        format!(" [pane {}/{}]", ws.panes.focused_id() + 1, pane_count)
-    } else {
-        String::new()
-    };
-
-    let left = if let Some(ref msg) = editor.status_message {
-        format!(" {} │ {}{}{}", mode_name, msg, diag_summary, pane_info)
-    } else {
-        format!(" {}{}{}", mode_name, diag_summary, pane_info)
-    };
-
-    let right = format!(
-        "{} │ {}:{} │ {}/{} ",
-        lsp_status,
-        cursor.line + 1,
-        cursor.column + 1,
-        cursor.line + 1,
-        total,
-    );
+    let left = info.format_left(&sb_config.left);
+    let right = info.format_right(&sb_config.right);
 
     let padding = cols.saturating_sub(left.len() + right.len());
     let full = format!("{}{:padding$}{}", left, "", right, padding = padding);
+
+    let mode_name = info.mode_name;
 
     // Colorize mode name
     let mode_color = match editor.mode {

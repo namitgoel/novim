@@ -3,32 +3,11 @@
 use novim_core::config;
 use novim_core::emulator::grid::{CellAttrs, CellColor};
 use novim_core::highlight::HighlightGroup;
+use novim_core::text_utils::{snap_to_char_boundary, char_col_to_byte};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-
-/// Convert a character column index to a byte offset in a string.
-fn char_col_to_byte(s: &str, col: usize) -> usize {
-    s.char_indices()
-        .nth(col)
-        .map(|(byte_idx, _)| byte_idx)
-        .unwrap_or(s.len())
-}
-
-/// Snap a byte offset to the nearest char boundary (rounding down).
-pub(super) fn snap_to_char_boundary(s: &str, byte_idx: usize) -> usize {
-    let idx = byte_idx.min(s.len());
-    if s.is_char_boundary(idx) {
-        return idx;
-    }
-    // Walk backwards to find the start of the char
-    let mut i = idx;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
 
 /// Apply syntax highlight spans to a line.
 pub(super) fn apply_highlights(content: &str, spans: &[novim_core::highlight::HighlightSpan], theme: &config::SyntaxTheme) -> Vec<Span<'static>> {
@@ -70,32 +49,14 @@ pub(super) fn apply_highlights(content: &str, spans: &[novim_core::highlight::Hi
 }
 
 pub(super) fn highlight_group_to_style(group: HighlightGroup, theme: &config::SyntaxTheme) -> Style {
-    let color_str = match group {
-        HighlightGroup::Keyword => &theme.keyword,
-        HighlightGroup::Function | HighlightGroup::FunctionBuiltin => &theme.function,
-        HighlightGroup::Type | HighlightGroup::TypeBuiltin => &theme.r#type,
-        HighlightGroup::Variable | HighlightGroup::VariableBuiltin => &theme.variable,
-        HighlightGroup::Constant | HighlightGroup::ConstantBuiltin => &theme.constant,
-        HighlightGroup::String => &theme.string,
-        HighlightGroup::Number => &theme.number,
-        HighlightGroup::Comment => &theme.comment,
-        HighlightGroup::Operator => &theme.operator,
-        HighlightGroup::Punctuation | HighlightGroup::PunctuationBracket | HighlightGroup::PunctuationDelimiter => &theme.punctuation,
-        HighlightGroup::Property => &theme.property,
-        HighlightGroup::Attribute => &theme.attribute,
-        HighlightGroup::Tag => &theme.property,
-        HighlightGroup::Escape => &theme.constant,
-        HighlightGroup::None => return Style::default(),
+    let Some(color_str) = group.theme_color(theme) else {
+        return Style::default();
     };
-
     let color = config_color_to_ratatui(config::parse_color(color_str));
     let mut style = Style::default().fg(color);
-
-    // Keywords get bold
-    if matches!(group, HighlightGroup::Keyword) {
+    if group.is_bold() {
         style = style.add_modifier(Modifier::BOLD);
     }
-
     style
 }
 
@@ -380,6 +341,7 @@ pub(super) fn cell_color_to_ratatui(color: CellColor) -> Option<Color> {
         CellColor::BrightCyan => Some(Color::LightCyan),
         CellColor::BrightWhite => Some(Color::White),
         CellColor::Indexed(idx) => Some(Color::Indexed(idx)),
+        CellColor::Rgb(r, g, b) => Some(Color::Rgb(r, g, b)),
     }
 }
 

@@ -306,6 +306,8 @@ fn ctx_with_snapshot() -> PluginContext {
         word_wrap: false,
         line_numbers: "hybrid".into(),
         pane_count: 1,
+        text: Some("hello world\nsecond line\nthird line\n".into()),
+        version: Some(0),
     };
     ctx
 }

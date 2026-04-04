@@ -92,6 +92,19 @@ impl LuaPlugin {
                     .map(|key| (String::new(), key));
                 Some(PluginAction::ShowPopup { title, lines, width, height, on_select })
             }
+            "open_float" => {
+                let title: String = tbl.get("title").ok()?;
+                let lines_tbl: mlua::Table = tbl.get("lines").ok()?;
+                let lines: Vec<String> = lines_tbl.pairs::<i64, String>()
+                    .filter_map(|r| r.ok().map(|(_, v)| v))
+                    .collect();
+                let width: u16 = tbl.get("width").unwrap_or(60);
+                let height: u16 = tbl.get("height").unwrap_or(20);
+                Some(PluginAction::OpenFloat { title, lines, width, height })
+            }
+            "close_float" => {
+                Some(PluginAction::CloseFloat)
+            }
             "emit_event" => {
                 let name: String = tbl.get("name").ok()?;
                 let mut data = std::collections::HashMap::new();

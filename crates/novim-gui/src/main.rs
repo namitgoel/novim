@@ -135,6 +135,8 @@ impl winit::application::ApplicationHandler<UserEvent> for Application {
         let tw = editor.config.editor.tab_width;
         editor.focused_buf_mut().recompute_folds(tw);
 
+        // Note: BufOpen is emitted from EditorState constructor and handle_edit_file
+
         let cached_text_buffer = glyphon::Buffer::new(
             &mut gpu.font_system,
             glyphon::Metrics::new(gpu.font_size, gpu.line_height),
@@ -285,19 +287,12 @@ impl winit::application::ApplicationHandler<UserEvent> for Application {
                 }
             }
 
-            // Poll LSP on a slower cadence (~50ms) since it's less latency-sensitive.
+            // Poll plugins on a slower cadence (~50ms) since it's less latency-sensitive.
             let now = Instant::now();
             if now.duration_since(self.last_tick) >= Duration::from_millis(50) {
                 self.last_tick = now;
-                let active = state.editor.active_tab;
-                for (i, ws) in state.editor.tabs.iter_mut().enumerate() {
-                    if i != active {
-                        ws.poll_lsp();
-                    }
-                }
-                state.editor.poll_active_lsp();
 
-                // Poll plugin scheduled/deferred callbacks
+                // Poll plugin scheduled/deferred callbacks (includes LSP)
                 let screen = novim_types::Rect::new(0, 0, state.gpu.surface_config.width as u16, state.gpu.surface_config.height as u16);
                 let timer_actions = state.editor.plugins.poll_timers();
                 if !timer_actions.is_empty() {
@@ -437,6 +432,74 @@ fn handle_key(
     }
 
     // ── Workspace list popup ──
+    // Symbol list: filter, navigate, accept
+    if editor.symbol_list.visible {
+        let cmd = match key.code {
+            KeyCode::Esc => EditorCommand::SymbolDismiss,
+            KeyCode::Enter => EditorCommand::SymbolAccept,
+            KeyCode::Up => EditorCommand::SymbolUp,
+            KeyCode::Down => EditorCommand::SymbolDown,
+            KeyCode::Backspace => EditorCommand::SymbolBackspace,
+            KeyCode::Char(c) => EditorCommand::SymbolInput(c),
+            _ => EditorCommand::Noop,
+        };
+        if !matches!(cmd, EditorCommand::Noop) {
+            let _ = editor.execute(cmd, screen);
+        }
+        return false;
+    }
+
+    // Floating window: Esc closes topmost
+    if !editor.floating_windows.is_empty() {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                let _ = editor.execute(EditorCommand::CloseFloat, screen);
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(fw) = editor.floating_windows.last_mut() {
+                    let max = fw.lines.len().saturating_sub(1);
+                    fw.scroll = (fw.scroll + 1).min(max);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(fw) = editor.floating_windows.last_mut() {
+                    fw.scroll = fw.scroll.saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
+        return false;
+    }
+
+    // Command window: j/k navigate, Enter executes, q/Esc closes
+    if editor.command_window.visible {
+        match key.code {
+            KeyCode::Char('k') | KeyCode::Up => {
+                if editor.command_window.selected > 0 {
+                    editor.command_window.selected -= 1;
+                }
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if editor.command_window.selected + 1 < editor.command_history.len() {
+                    editor.command_window.selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                let idx = editor.command_window.selected;
+                if let Some(cmd_str) = editor.command_history.get(idx).cloned() {
+                    editor.command_window.visible = false;
+                    let parsed = novim_core::input::parse_ex_command(&cmd_str);
+                    let _ = editor.execute(parsed, screen);
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                editor.command_window.visible = false;
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     if editor.show_workspace_list {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -505,30 +568,17 @@ fn handle_key(
         let copy_offset = editor.tabs[editor.active_tab].panes
             .get_pane(focused_id).map(|p| p.copy_mode_offset).unwrap_or(0);
         if copy_offset > 0 {
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => {
-                    let _ = editor.execute(EditorCommand::ExitCopyMode, screen);
-                    return false;
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    if let Some(pane) = editor.tabs[editor.active_tab].panes.get_pane_mut(focused_id) {
-                        let max = pane.content.as_buffer_like().scrollback_len();
-                        if pane.copy_mode_offset < max {
-                            pane.copy_mode_offset += 1;
-                        }
-                    }
-                    return false;
-                }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    if let Some(pane) = editor.tabs[editor.active_tab].panes.get_pane_mut(focused_id) {
-                        if pane.copy_mode_offset > 1 {
-                            pane.copy_mode_offset -= 1;
-                        }
-                    }
-                    return false;
-                }
-                _ => return false,
+            let cmd = novim_core::editor::handle_copy_mode_key(
+                &mut editor.tabs[editor.active_tab].panes,
+                focused_id,
+                key,
+                &mut editor.registers,
+                &mut editor.status_message,
+            );
+            if !matches!(cmd, EditorCommand::Noop) {
+                let _ = editor.execute(cmd, screen);
             }
+            return false;
         }
     }
 
@@ -600,6 +650,7 @@ fn handle_key(
                 in_terminal,
                 popup_showing,
                 true, // gui_mode: Ctrl+W forwards to PTY in terminal panes
+                editor.macros.recording.is_some(),
             )
         };
 

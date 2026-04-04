@@ -56,6 +56,10 @@ pub struct BufferSnapshot {
     pub line_numbers: String,
     // Pane info
     pub pane_count: usize,
+    // Full text (for LSP didChange)
+    pub text: Option<String>,
+    // Document version (for LSP versioning)
+    pub version: Option<i32>,
 }
 
 // ── PluginAction: structured mutations plugins can request ──
@@ -92,6 +96,26 @@ pub enum PluginAction {
         /// (plugin_id, callback_key) for on_select. None = display-only.
         on_select: Option<(String, String)>,
     },
+    /// Open a floating window.
+    OpenFloat {
+        title: String,
+        lines: Vec<String>,
+        width: u16,
+        height: u16,
+    },
+    /// Close the topmost floating window.
+    CloseFloat,
+    // ── LSP plugin actions ──
+    /// Set diagnostics for a file URI.
+    SetDiagnostics { uri: String, diagnostics: Vec<crate::lsp::Diagnostic> },
+    /// Show completion items in the completion popup.
+    ShowCompletions { items: Vec<crate::lsp::CompletionItem> },
+    /// Show hover text at cursor.
+    ShowHoverText { text: String },
+    /// Go to a file location (for goto-definition).
+    GotoLocation { file: String, line: u32, col: u32 },
+    /// Set LSP status message.
+    SetLspStatus { lang: String, message: Option<String> },
 }
 
 /// Gutter sign type for plugin-driven gutter indicators.
@@ -166,6 +190,8 @@ pub trait Plugin: Send {
     fn poll_timers(&mut self) -> Vec<PluginAction> { vec![] }
     /// Check if the last on_event call had an error. Default: false.
     fn had_error(&self) -> bool { false }
+    /// Downcast support for accessing concrete plugin types.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
 // ── Events ──
@@ -186,6 +212,36 @@ pub enum EditorEvent {
     Custom { name: String, data: HashMap<String, String> },
     /// LSP server attached to a buffer.
     LspAttach { path: String, language: String },
+}
+
+// ── Plugin Manifest ──
+
+/// Plugin metadata from `plugin.toml`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct PluginManifest {
+    /// Plugin display name.
+    pub name: String,
+    /// Semantic version string.
+    pub version: String,
+    /// Short description.
+    pub description: String,
+    /// Author name.
+    pub author: String,
+    /// List of plugin IDs this plugin depends on.
+    pub dependencies: Vec<String>,
+    /// Minimum novim version required.
+    pub min_novim_version: Option<String>,
+    /// Entry point file (default: "init.lua").
+    pub entry: Option<String>,
+}
+
+impl PluginManifest {
+    /// Load a manifest from a `plugin.toml` file. Returns None if file doesn't exist.
+    pub fn from_file(path: &std::path::Path) -> Option<Self> {
+        let content = std::fs::read_to_string(path).ok()?;
+        toml::from_str(&content).ok()
+    }
 }
 
 // ── PluginContext ──
@@ -230,6 +286,7 @@ mod tests {
     impl Plugin for TestPlugin {
         fn id(&self) -> &str { "test_plugin" }
         fn name(&self) -> &str { "Test Plugin" }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
         fn init(&mut self, _ctx: &mut PluginContext) {}
 
         fn shutdown(&mut self) {
@@ -290,6 +347,7 @@ mod tests {
         impl Plugin for CmdPlugin {
             fn id(&self) -> &str { "cmd_plugin" }
             fn name(&self) -> &str { "Command Plugin" }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
             fn init(&mut self, _ctx: &mut PluginContext) {}
             fn on_event(&mut self, event: &EditorEvent, _ctx: &PluginContext) -> Vec<PluginAction> {
                 if let EditorEvent::BufWrite { .. } = event {

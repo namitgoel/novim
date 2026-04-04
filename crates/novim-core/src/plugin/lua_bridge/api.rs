@@ -425,6 +425,55 @@ impl LuaPlugin {
         }).map_err(|e| format!("ui.popup: {}", e))?)
             .map_err(|e| format!("set ui.popup: {}", e))?;
 
+        // novim.ui.float(title, lines, [opts]) — open a floating window
+        // opts: { width = 60, height = 20 }
+        ui.set("float", self.lua.create_function(|lua, args: mlua::MultiValue| {
+            let mut args_vec: Vec<Value> = args.into_iter().collect();
+            if args_vec.len() < 2 {
+                return Err(mlua::Error::runtime("ui.float requires at least 2 arguments: title, lines"));
+            }
+            let title = match args_vec.remove(0) {
+                Value::String(s) => s.to_str()?.to_string(),
+                _ => return Err(mlua::Error::runtime("first argument must be title string")),
+            };
+            let lines = match args_vec.remove(0) {
+                Value::Table(t) => t,
+                _ => return Err(mlua::Error::runtime("second argument must be lines table")),
+            };
+
+            let mut width: u16 = 60;
+            let mut height: u16 = 20;
+            if !args_vec.is_empty() {
+                if let Value::Table(opts) = args_vec.remove(0) {
+                    if let Ok(w) = opts.get::<u16>("width") { width = w; }
+                    if let Ok(h) = opts.get::<u16>("height") { height = h; }
+                }
+            }
+
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let push: Function = novim.get("_push_action")?;
+            let action = lua.create_table()?;
+            action.set("type", "open_float")?;
+            action.set("title", title)?;
+            action.set("lines", lines)?;
+            action.set("width", width)?;
+            action.set("height", height)?;
+            push.call::<()>(action)?;
+            Ok(())
+        }).map_err(|e| format!("ui.float: {}", e))?)
+            .map_err(|e| format!("set ui.float: {}", e))?;
+
+        // novim.ui.close_float() — close the topmost floating window
+        ui.set("close_float", self.lua.create_function(|lua, ()| {
+            let novim: mlua::Table = lua.globals().get("novim")?;
+            let push: Function = novim.get("_push_action")?;
+            let action = lua.create_table()?;
+            action.set("type", "close_float")?;
+            push.call::<()>(action)?;
+            Ok(())
+        }).map_err(|e| format!("ui.close_float: {}", e))?)
+            .map_err(|e| format!("set ui.close_float: {}", e))?;
+
         novim.set("ui", ui)
             .map_err(|e| format!("Failed to set novim.ui: {}", e))?;
 

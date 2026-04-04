@@ -127,6 +127,23 @@ impl PluginManager {
         self.registry.lookup(name).is_some()
     }
 
+    /// Return all registered plugin command names (for tab completion).
+    pub fn command_names(&self) -> Vec<String> {
+        self.registry.names()
+    }
+
+    /// Get a mutable reference to the LSP plugin (for direct command dispatch).
+    pub fn lsp_plugin(&mut self) -> Option<&mut super::builtins::lsp_plugin::LspPlugin> {
+        for plugin in &mut self.plugins {
+            if plugin.id() == "lsp" {
+                if let Some(lsp) = plugin.as_any_mut().downcast_mut::<super::builtins::lsp_plugin::LspPlugin>() {
+                    return Some(lsp);
+                }
+            }
+        }
+        None
+    }
+
     /// Take accumulated load errors (clears the list).
     pub fn take_load_errors(&mut self) -> Vec<String> {
         std::mem::take(&mut self.load_errors)
@@ -156,7 +173,7 @@ impl PluginManager {
             self.keymaps.unregister_plugin(id);
         }
         // Re-load
-        self.load_one_lua(path);
+        self.load_one_lua(path, None);
     }
 
     /// Poll all plugins for scheduled/deferred callbacks. Returns actions.
@@ -184,7 +201,7 @@ impl PluginManager {
 
         let init_lua = config_dir.join("init.lua");
         if init_lua.is_file() {
-            self.load_one_lua(&init_lua);
+            self.load_one_lua(&init_lua, None);
         }
 
         let plugins_dir = config_dir.join("plugins");
@@ -193,19 +210,46 @@ impl PluginManager {
                 .into_iter()
                 .flatten()
                 .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "lua"))
                 .collect();
             entries.sort_by_key(|e| e.file_name());
 
             for entry in entries {
-                self.load_one_lua(&entry.path());
+                let path = entry.path();
+                if path.is_file() && path.extension().is_some_and(|ext| ext == "lua") {
+                    // Single .lua file plugin (legacy)
+                    self.load_one_lua(&path, None);
+                } else if path.is_dir() {
+                    // Directory-based plugin: look for plugin.toml + init.lua
+                    let manifest_path = path.join("plugin.toml");
+                    let manifest = super::PluginManifest::from_file(&manifest_path);
+                    let entry_file = manifest.as_ref()
+                        .and_then(|m| m.entry.as_deref())
+                        .unwrap_or("init.lua");
+                    let lua_path = path.join(entry_file);
+                    if lua_path.is_file() {
+                        self.load_one_lua(&lua_path, manifest);
+                    }
+                }
             }
         }
     }
 
-    fn load_one_lua(&mut self, path: &std::path::Path) {
+    fn load_one_lua(&mut self, path: &std::path::Path, manifest: Option<super::PluginManifest>) {
         match LuaPlugin::from_file(path) {
             Ok(mut plugin) => {
+                if let Some(ref m) = manifest {
+                    if !m.name.is_empty() {
+                        log::info!("Plugin manifest: {} v{}", m.name, m.version);
+                    }
+                    // Check dependencies
+                    for dep in &m.dependencies {
+                        if !self.enabled.contains_key(dep) {
+                            let msg = format!("Plugin {} requires dependency '{}' which is not loaded", m.name, dep);
+                            log::warn!("{}", msg);
+                            self.load_errors.push(msg);
+                        }
+                    }
+                }
                 let id = plugin.id().to_string();
 
                 let config = self.plugin_configs.get(&id).cloned().unwrap_or_default();
