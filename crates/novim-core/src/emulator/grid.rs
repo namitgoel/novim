@@ -87,6 +87,8 @@ pub struct Grid {
     history: VecDeque<Vec<Cell>>,
     /// Maximum history lines to keep.
     max_history: usize,
+    /// Shell CWD reported via OSC 7 escape sequence.
+    pub osc7_cwd: Option<String>,
 }
 
 impl Grid {
@@ -106,6 +108,7 @@ impl Grid {
             scroll_bottom: rows.saturating_sub(1),
             history: VecDeque::new(),
             max_history: 10_000,
+            osc7_cwd: None,
         }
     }
 

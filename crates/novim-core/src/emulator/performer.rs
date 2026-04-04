@@ -28,7 +28,34 @@ impl<'a> Perform for GridPerformer<'a> {
     fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
     fn put(&mut self, _byte: u8) {}
     fn unhook(&mut self) {}
-    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        // OSC 7 — Shell CWD integration
+        // Format: \x1b]7;file:///path\x07  or  \x1b]7;file://host/path\x07
+        // VTE splits on ';' so params[0] = b"7", params[1] = b"file:///path"
+        if let Some(first) = params.first() {
+            if *first == b"7" {
+                if let Some(uri_bytes) = params.get(1) {
+                    if let Ok(uri) = std::str::from_utf8(uri_bytes) {
+                        // Strip "file://" prefix, optionally with hostname
+                        let path = if let Some(rest) = uri.strip_prefix("file://") {
+                            // rest is either "/path" or "hostname/path"
+                            if rest.starts_with('/') {
+                                rest.to_string()
+                            } else {
+                                // Skip hostname part: find the first '/'
+                                rest.find('/').map(|i| rest[i..].to_string()).unwrap_or_default()
+                            }
+                        } else {
+                            uri.to_string()
+                        };
+                        if !path.is_empty() {
+                            self.grid.osc7_cwd = Some(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {}
 
     fn csi_dispatch(

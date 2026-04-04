@@ -483,6 +483,40 @@ fn handle_key(
 
     // ── Normal key dispatch ──
     let in_terminal = editor.focused_buf().is_terminal();
+
+    // Copy mode: intercept keys before terminal forwarding
+    if in_terminal {
+        let focused_id = editor.tabs[editor.active_tab].panes.focused_id();
+        let copy_offset = editor.tabs[editor.active_tab].panes
+            .get_pane(focused_id).map(|p| p.copy_mode_offset).unwrap_or(0);
+        if copy_offset > 0 {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    let _ = editor.execute(EditorCommand::ExitCopyMode, screen);
+                    return false;
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if let Some(pane) = editor.tabs[editor.active_tab].panes.get_pane_mut(focused_id) {
+                        let max = pane.content.as_buffer_like().scrollback_len();
+                        if pane.copy_mode_offset < max {
+                            pane.copy_mode_offset += 1;
+                        }
+                    }
+                    return false;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if let Some(pane) = editor.tabs[editor.active_tab].panes.get_pane_mut(focused_id) {
+                        if pane.copy_mode_offset > 1 {
+                            pane.copy_mode_offset -= 1;
+                        }
+                    }
+                    return false;
+                }
+                _ => return false,
+            }
+        }
+    }
+
     if editor.hover_text.is_some() {
         editor.hover_text = None;
     }

@@ -28,6 +28,8 @@ pub fn key_to_string(key: &KeyEvent) -> String {
         KeyCode::Right => "Right".to_string(),
         KeyCode::Up => "Up".to_string(),
         KeyCode::Down => "Down".to_string(),
+        KeyCode::PageUp => "PageUp".to_string(),
+        KeyCode::PageDown => "PageDown".to_string(),
         _ => return String::new(),
     };
     parts.push(key_name);
@@ -346,6 +348,35 @@ pub enum EditorCommand {
     /// gf — open file under cursor
     OpenFileUnderCursor,
 
+    /// P — paste before cursor
+    PasteBefore,
+    /// zz — scroll so cursor is at center of screen
+    ScrollCenter,
+    /// zt — scroll so cursor is at top of screen
+    ScrollTop,
+    /// zb — scroll so cursor is at bottom of screen
+    ScrollBottom,
+    /// :marks — list all marks
+    ListMarks,
+    /// :registers / :reg — list all registers
+    ListRegisters,
+    /// gv — reselect last visual selection
+    ReselectVisual,
+    /// Ctrl+W x — swap focused pane with next
+    SwapPane,
+
+    /// Scroll viewport down by full page
+    PageDown,
+    /// Scroll viewport up by full page
+    PageUp,
+
+    /// Enter terminal copy mode (Ctrl+W [)
+    EnterCopyMode,
+    /// Exit terminal copy mode
+    ExitCopyMode,
+    /// Replace mode insert char (overwrites instead of inserting)
+    ReplaceInsertChar(char),
+
     Noop,
 }
 
@@ -455,6 +486,7 @@ pub fn key_to_command(
             KeyCode::Char('T') => (EditorCommand::PrevTab, InputState::Ready),
             KeyCode::Char('x') => (EditorCommand::OpenUrlUnderCursor, InputState::Ready),
             KeyCode::Char('f') => (EditorCommand::OpenFileUnderCursor, InputState::Ready),
+            KeyCode::Char('v') => (EditorCommand::ReselectVisual, InputState::Ready),
             _ => (EditorCommand::Noop, InputState::Ready),
         };
     }
@@ -464,6 +496,9 @@ pub fn key_to_command(
             KeyCode::Char('a') => (EditorCommand::ToggleFold, InputState::Ready),
             KeyCode::Char('M') => (EditorCommand::FoldAll, InputState::Ready),
             KeyCode::Char('R') => (EditorCommand::UnfoldAll, InputState::Ready),
+            KeyCode::Char('z') => (EditorCommand::ScrollCenter, InputState::Ready),
+            KeyCode::Char('t') => (EditorCommand::ScrollTop, InputState::Ready),
+            KeyCode::Char('b') => (EditorCommand::ScrollBottom, InputState::Ready),
             _ => (EditorCommand::Noop, InputState::Ready),
         };
     }
@@ -631,6 +666,7 @@ pub fn key_to_command(
     match mode {
         EditorMode::Normal => normal_mode_command(key),
         EditorMode::Insert => (insert_mode_command(key), InputState::Ready),
+        EditorMode::Replace => (replace_mode_command(key), InputState::Ready),
         EditorMode::Visual | EditorMode::VisualBlock => (visual_mode_command(key), InputState::Ready),
         _ => (EditorCommand::Noop, InputState::Ready),
     }
@@ -670,6 +706,8 @@ fn pane_command(key: KeyEvent) -> EditorCommand {
         KeyCode::Char('>') => EditorCommand::ResizePaneWider,
         KeyCode::Char('<') => EditorCommand::ResizePaneNarrower,
         KeyCode::Char('z') => EditorCommand::ZoomPane,
+        KeyCode::Char('x') => EditorCommand::SwapPane,
+        KeyCode::Char('[') => EditorCommand::EnterCopyMode,
         _ => EditorCommand::Noop,
     }
 }
@@ -695,6 +733,17 @@ fn normal_mode_command(key: KeyEvent) -> (EditorCommand, InputState) {
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             (EditorCommand::ScrollDown, InputState::Ready)
         }
+        // Full page scroll: Ctrl+B (page up), PageUp/PageDown keys
+        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            (EditorCommand::PageUp, InputState::Ready)
+        }
+        KeyCode::PageUp => (EditorCommand::PageUp, InputState::Ready),
+        KeyCode::PageDown => (EditorCommand::PageDown, InputState::Ready),
+        // Sentence motions
+        KeyCode::Char(')') => (EditorCommand::MoveCursor(Direction::SentenceForward), InputState::Ready),
+        KeyCode::Char('(') => (EditorCommand::MoveCursor(Direction::SentenceBackward), InputState::Ready),
+        // Replace mode
+        KeyCode::Char('R') => (EditorCommand::SwitchMode(EditorMode::Replace), InputState::Ready),
         // Multi-cursor: Alt+Up/Down to add cursors
         KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
             (EditorCommand::AddCursorAbove, InputState::Ready)
@@ -717,6 +766,7 @@ fn normal_mode_command(key: KeyEvent) -> (EditorCommand, InputState) {
         }
         KeyCode::Char('v') => (EditorCommand::EnterVisual, InputState::Ready),
         KeyCode::Char('p') => (EditorCommand::Paste, InputState::Ready),
+        KeyCode::Char('P') => (EditorCommand::PasteBefore, InputState::Ready),
         KeyCode::Esc => (EditorCommand::ClearSearch, InputState::Ready),
         // Count prefix: digits 1-9 start a count, 0 is not a count starter
         KeyCode::Char(_c @ '1'..='9') => (EditorCommand::Noop, InputState::AccumulatingCount),
@@ -803,6 +853,9 @@ fn normal_mode_command(key: KeyEvent) -> (EditorCommand, InputState) {
         // Search word under cursor
         KeyCode::Char('*') => (EditorCommand::SearchWordForward, InputState::Ready),
         KeyCode::Char('#') => (EditorCommand::SearchWordBackward, InputState::Ready),
+        // Paragraph motions
+        KeyCode::Char('{') => (EditorCommand::MoveCursor(Direction::ParagraphBackward), InputState::Ready),
+        KeyCode::Char('}') => (EditorCommand::MoveCursor(Direction::ParagraphForward), InputState::Ready),
         // Match bracket
         KeyCode::Char('%') => (EditorCommand::MatchBracket, InputState::Ready),
         _ => (EditorCommand::Noop, InputState::Ready),
@@ -821,6 +874,20 @@ fn insert_mode_command(key: KeyEvent) -> EditorCommand {
         }
         KeyCode::Char(c) => EditorCommand::InsertChar(c),
         KeyCode::Tab => EditorCommand::InsertTab,
+        KeyCode::Backspace => EditorCommand::DeleteCharBefore,
+        KeyCode::Enter => EditorCommand::InsertNewline,
+        KeyCode::Left => EditorCommand::MoveCursor(Direction::Left),
+        KeyCode::Right => EditorCommand::MoveCursor(Direction::Right),
+        KeyCode::Up => EditorCommand::MoveCursor(Direction::Up),
+        KeyCode::Down => EditorCommand::MoveCursor(Direction::Down),
+        _ => EditorCommand::Noop,
+    }
+}
+
+fn replace_mode_command(key: KeyEvent) -> EditorCommand {
+    match key.code {
+        KeyCode::Esc => EditorCommand::SwitchMode(EditorMode::Normal),
+        KeyCode::Char(c) => EditorCommand::ReplaceInsertChar(c),
         KeyCode::Backspace => EditorCommand::DeleteCharBefore,
         KeyCode::Enter => EditorCommand::InsertNewline,
         KeyCode::Left => EditorCommand::MoveCursor(Direction::Left),
@@ -992,6 +1059,8 @@ pub fn parse_ex_command(input: &str) -> EditorCommand {
                 EditorCommand::RenameTab(args.to_string())
             }
         }
+        "marks" => EditorCommand::ListMarks,
+        "registers" | "reg" => EditorCommand::ListRegisters,
         "noh" | "nohlsearch" => EditorCommand::ClearSearch,
         "definition" | "def" => EditorCommand::GotoDefinition,
         "explore" | "Explore" | "Ex" => {

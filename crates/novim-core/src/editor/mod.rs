@@ -75,6 +75,8 @@ pub struct EditorState {
     pub(crate) insert_record: Vec<EditorCommand>,
     /// Plugin system manager.
     pub plugins: PluginManager,
+    /// Last visual selection for gv (reselect).
+    pub last_visual_selection: Option<novim_types::Selection>,
     /// Last f/F/t/T find for ; and , repeat.
     pub last_find_char: Option<(char, bool, bool)>,
     /// Command-line history for up/down recall.
@@ -154,6 +156,7 @@ impl EditorState {
             recording_insert: false,
             insert_record: Vec::new(),
             plugins,
+            last_visual_selection: None,
             last_find_char: None,
             command_history: Vec::new(),
             command_history_idx: 0,
@@ -261,7 +264,7 @@ impl EditorState {
             let is_edit = matches!(cmd,
                 EditorCommand::DeleteLines(_) | EditorCommand::DeleteMotion(..)
                 | EditorCommand::ChangeMotion(..) | EditorCommand::ChangeLines(_)
-                | EditorCommand::DeleteSelection | EditorCommand::Paste
+                | EditorCommand::DeleteSelection | EditorCommand::Paste | EditorCommand::PasteBefore
                 | EditorCommand::DeleteTextObject(..) | EditorCommand::ChangeTextObject(..)
                 | EditorCommand::YankLines(_) | EditorCommand::InsertChar(_)
             );
@@ -338,6 +341,7 @@ impl EditorState {
 
             // Editing
             EditorCommand::Paste
+            | EditorCommand::PasteBefore
             | EditorCommand::SwitchMode(..)
             | EditorCommand::InsertChar(..)
             | EditorCommand::InsertTab
@@ -365,7 +369,8 @@ impl EditorState {
             | EditorCommand::JoinLines(..)
             | EditorCommand::Indent(..)
             | EditorCommand::Dedent(..)
-            | EditorCommand::ToggleCase => self.execute_editing(cmd, screen_area),
+            | EditorCommand::ToggleCase
+            | EditorCommand::ReplaceInsertChar(..) => self.execute_editing(cmd, screen_area),
 
             // Panes
             EditorCommand::SplitPane(..)
@@ -378,7 +383,10 @@ impl EditorState {
             | EditorCommand::ResizePaneShrink
             | EditorCommand::ResizePaneWider
             | EditorCommand::ResizePaneNarrower
-            | EditorCommand::ZoomPane => self.execute_pane(cmd, screen_area),
+            | EditorCommand::ZoomPane
+            | EditorCommand::SwapPane
+            | EditorCommand::EnterCopyMode
+            | EditorCommand::ExitCopyMode => self.execute_pane(cmd, screen_area),
 
             // Command mode
             EditorCommand::CommandInput(..)
@@ -442,10 +450,15 @@ impl EditorState {
             // Scroll / buffer
             EditorCommand::ScrollUp
             | EditorCommand::ScrollDown
+            | EditorCommand::ScrollCenter
+            | EditorCommand::ScrollTop
+            | EditorCommand::ScrollBottom
+            | EditorCommand::PageDown
+            | EditorCommand::PageUp
             | EditorCommand::BufferNext
             | EditorCommand::BufferPrev
             | EditorCommand::BufferList
-            | EditorCommand::SetOption(..) => self.execute_scroll_buffer(cmd),
+            | EditorCommand::SetOption(..) => self.execute_scroll_buffer(cmd, screen_area),
 
             // Macros
             EditorCommand::StartMacroRecord(..)
@@ -456,7 +469,34 @@ impl EditorState {
             EditorCommand::SetMark(..)
             | EditorCommand::JumpToMark(..)
             | EditorCommand::JumpBack
-            | EditorCommand::JumpForward => self.execute_marks_jumps(cmd),
+            | EditorCommand::JumpForward
+            | EditorCommand::ListMarks => self.execute_marks_jumps(cmd),
+
+            EditorCommand::ListRegisters => {
+                let mut items: Vec<String> = self.registers.iter()
+                    .map(|(k, v)| {
+                        let preview: String = v.chars().take(30).collect();
+                        format!("\"{}  {}", k, preview)
+                    })
+                    .collect();
+                items.sort();
+                if items.is_empty() {
+                    self.status_message = Some("No registers".to_string());
+                } else {
+                    self.status_message = Some(items.join(" | "));
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ReselectVisual => {
+                if let Some(sel) = self.last_visual_selection {
+                    self.focused_buf_mut().set_selection(Some(sel));
+                    self.focused_buf_mut().set_cursor_pos(sel.head);
+                    self.mode = EditorMode::Visual;
+                } else {
+                    self.status_message = Some("No previous visual selection".to_string());
+                }
+                Ok(ExecOutcome::Continue)
+            }
 
             // Kept inline
             EditorCommand::Quit => self.handle_quit(),

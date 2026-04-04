@@ -397,6 +397,7 @@ pub(super) fn render_status_bar(editor: &EditorState, cols: usize) -> Vec<RichSp
         EditorMode::Insert => GREEN,
         EditorMode::Visual | EditorMode::VisualBlock => YELLOW,
         EditorMode::Command => YELLOW,
+        EditorMode::Replace => RED,
     };
 
     let mut spans = Vec::new();

@@ -47,6 +47,8 @@ pub struct Pane {
     pub id: PaneId,
     pub content: PaneContent,
     pub viewport_offset: usize,
+    /// When > 0, the terminal pane is in copy mode, showing scrollback at this offset.
+    pub copy_mode_offset: usize,
 }
 
 impl Pane {
@@ -55,6 +57,7 @@ impl Pane {
             id,
             content: PaneContent::Editor(buffer),
             viewport_offset: 0,
+            copy_mode_offset: 0,
         }
     }
 
@@ -63,6 +66,7 @@ impl Pane {
             id,
             content: PaneContent::Terminal(term),
             viewport_offset: 0,
+            copy_mode_offset: 0,
         }
     }
 }
@@ -188,6 +192,23 @@ impl PaneNode {
         match self {
             PaneNode::Leaf(pane) => pane.id,
             PaneNode::Split { first, .. } => first.first_pane_id(),
+        }
+    }
+
+    /// Swap the content and viewport_offset of two leaf panes by ID.
+    fn swap_pane_contents(&mut self, id_a: PaneId, id_b: PaneId) {
+        // Collect raw pointers to avoid double mutable borrow
+        let ptr_a = self.get_pane_mut(id_a).map(|p| p as *mut Pane);
+        let ptr_b = self.get_pane_mut(id_b).map(|p| p as *mut Pane);
+        if let (Some(a), Some(b)) = (ptr_a, ptr_b) {
+            if a != b {
+                // SAFETY: a and b are distinct leaf nodes in the tree
+                unsafe {
+                    std::mem::swap(&mut (*a).content, &mut (*b).content);
+                    std::mem::swap(&mut (*a).viewport_offset, &mut (*b).viewport_offset);
+                    std::mem::swap(&mut (*a).copy_mode_offset, &mut (*b).copy_mode_offset);
+                }
+            }
         }
     }
 
@@ -565,6 +586,21 @@ impl PaneManager {
         self.root.collect_ids(&mut ids);
         if let Some(pos) = ids.iter().position(|id| *id == self.focused_id) {
             self.focused_id = ids[(pos + 1) % ids.len()];
+        }
+    }
+
+    /// Swap the focused pane's content with the next leaf pane.
+    pub fn swap_focused_with_next(&mut self) {
+        let mut ids = Vec::new();
+        self.root.collect_ids(&mut ids);
+        if ids.len() < 2 {
+            return;
+        }
+        if let Some(pos) = ids.iter().position(|id| *id == self.focused_id) {
+            let next_pos = (pos + 1) % ids.len();
+            let id_a = ids[pos];
+            let id_b = ids[next_pos];
+            self.root.swap_pane_contents(id_a, id_b);
         }
     }
 

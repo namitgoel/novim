@@ -397,6 +397,61 @@ impl Buffer {
         self.char_idx_to_position(idx)
     }
 
+    /// Find position at start of next sentence (vim `)` motion).
+    /// A sentence ends with `.`, `!`, or `?` followed by whitespace or newline.
+    fn find_sentence_forward_pos(&self) -> Position {
+        let total = self.rope.len_chars();
+        let mut idx = self.cursor_to_char_idx();
+        if idx >= total { return self.cursor; }
+
+        // Move past current position
+        idx += 1;
+        while idx < total {
+            let c = self.rope.char(idx);
+            // Check if previous char was a sentence terminator
+            if idx > 0 {
+                let prev = self.rope.char(idx - 1);
+                if (prev == '.' || prev == '!' || prev == '?') && (c.is_whitespace()) {
+                    // Skip whitespace to get to start of next sentence
+                    while idx < total && self.rope.char(idx).is_whitespace() {
+                        idx += 1;
+                    }
+                    if idx >= total { idx = total.saturating_sub(1); }
+                    return self.char_idx_to_position(idx);
+                }
+            }
+            idx += 1;
+        }
+        // Reached end of file
+        self.char_idx_to_position(total.saturating_sub(1))
+    }
+
+    /// Find position at start of current/previous sentence (vim `(` motion).
+    fn find_sentence_backward_pos(&self) -> Position {
+        let mut idx = self.cursor_to_char_idx();
+        if idx == 0 { return self.cursor; }
+
+        // Move back past any whitespace we're sitting on
+        idx -= 1;
+        while idx > 0 && self.rope.char(idx).is_whitespace() {
+            idx -= 1;
+        }
+        // Now skip backwards past sentence content to find the previous terminator
+        while idx > 0 {
+            let c = self.rope.char(idx - 1);
+            if c == '.' || c == '!' || c == '?' {
+                // Found a sentence terminator — skip whitespace after it
+                while idx < self.rope.len_chars() && self.rope.char(idx).is_whitespace() {
+                    idx += 1;
+                }
+                return self.char_idx_to_position(idx);
+            }
+            idx -= 1;
+        }
+        // Reached start of file
+        self.char_idx_to_position(0)
+    }
+
     /// Find inner word text object range (char indices).
     pub fn find_inner_word(&self) -> Option<(usize, usize)> {
         let total = self.rope.len_chars();
@@ -579,6 +634,40 @@ impl PaneDisplay for Buffer {
             Direction::FileEnd => {
                 self.cursor.line = self.rope.len_lines().saturating_sub(1);
                 self.clamp_cursor_column();
+            }
+            Direction::ParagraphForward => {
+                let total = self.rope.len_lines();
+                let mut line = self.cursor.line;
+                // Skip current non-blank lines
+                while line < total && !self.rope.line(line).to_string().trim().is_empty() {
+                    line += 1;
+                }
+                // Skip blank lines
+                while line < total && self.rope.line(line).to_string().trim().is_empty() {
+                    line += 1;
+                }
+                self.cursor.line = line.min(total.saturating_sub(1));
+                self.cursor.column = 0;
+            }
+            Direction::ParagraphBackward => {
+                let mut line = self.cursor.line;
+                if line > 0 { line -= 1; }
+                // Skip blank lines
+                while line > 0 && self.rope.line(line).to_string().trim().is_empty() {
+                    line -= 1;
+                }
+                // Skip non-blank lines
+                while line > 0 && !self.rope.line(line - 1).to_string().trim().is_empty() {
+                    line -= 1;
+                }
+                self.cursor.line = line;
+                self.cursor.column = 0;
+            }
+            Direction::SentenceForward => {
+                self.cursor = self.find_sentence_forward_pos();
+            }
+            Direction::SentenceBackward => {
+                self.cursor = self.find_sentence_backward_pos();
             }
         }
     }
@@ -793,6 +882,53 @@ impl PaneDisplay for Buffer {
             }
         }
         None
+    }
+}
+
+impl Buffer {
+    /// Replace mode insert: if a char exists at cursor, overwrite it; if at end of line, insert normally.
+    pub fn replace_insert_char(&mut self, c: char) {
+        let line_len = self.line_len(self.cursor.line);
+        let char_idx = self.rope.line_to_char(self.cursor.line) + self.cursor.column;
+
+        if self.cursor.column < line_len {
+            // Overwrite existing character
+            let old_char = self.rope.char(char_idx);
+            self.ensure_undo_group();
+            if let Some(group) = &mut self.current_group {
+                group.ops.push(EditOp::Delete { char_idx, content: old_char.to_string() });
+            }
+            self.rope.remove(char_idx..char_idx + 1);
+
+            self.rope.insert_char(char_idx, c);
+            if let Some(group) = &mut self.current_group {
+                group.ops.push(EditOp::Insert { char_idx, content: c.to_string() });
+            }
+
+            if c == '\n' {
+                self.cursor = Position::new(self.cursor.line + 1, 0);
+            } else {
+                self.cursor.column += 1;
+            }
+        } else {
+            // At end of line — insert normally
+            self.rope.insert_char(char_idx, c);
+            self.ensure_undo_group();
+            if let Some(group) = &mut self.current_group {
+                group.ops.push(EditOp::Insert { char_idx, content: c.to_string() });
+            }
+            if c == '\n' {
+                self.cursor = Position::new(self.cursor.line + 1, 0);
+            } else {
+                self.cursor.column += 1;
+            }
+        }
+
+        self.dirty = true;
+        self.highlights_dirty = true;
+        self.version += 1;
+        self.invalidate_text_cache();
+        self.redo_stack.clear();
     }
 }
 
@@ -1070,10 +1206,12 @@ impl TextEditing for Buffer {
                         self.delete_lines(1);
                     }
                 }
-                // Word/line/file motions: delete from cursor to target position
+                // Word/line/file/paragraph/sentence motions: delete from cursor to target position
                 Direction::WordForward | Direction::WordBackward | Direction::WordEnd
                 | Direction::LineStart | Direction::LineEnd
-                | Direction::FileStart | Direction::FileEnd => {
+                | Direction::FileStart | Direction::FileEnd
+                | Direction::ParagraphForward | Direction::ParagraphBackward
+                | Direction::SentenceForward | Direction::SentenceBackward => {
                     let start_idx = self.cursor_to_char_idx();
                     self.move_cursor(dir);
                     let end_idx = self.cursor_to_char_idx();

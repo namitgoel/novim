@@ -302,6 +302,44 @@ impl TerminalManager {
                         }
 
                         let in_terminal = self.state.focused_buf().is_terminal();
+
+                        // Copy mode: intercept keys before terminal forwarding
+                        if in_terminal {
+                            let focused_id = self.state.tabs[self.state.active_tab].panes.focused_id();
+                            let copy_offset = self.state.tabs[self.state.active_tab].panes
+                                .get_pane(focused_id).map(|p| p.copy_mode_offset).unwrap_or(0);
+                            if copy_offset > 0 {
+                                let cmd = match key.code {
+                                    KeyCode::Char('q') | KeyCode::Esc => EditorCommand::ExitCopyMode,
+                                    KeyCode::Char('k') | KeyCode::Up => {
+                                        // Scroll up in copy mode
+                                        if let Some(pane) = self.state.tabs[self.state.active_tab].panes.get_pane_mut(focused_id) {
+                                            let max = pane.content.as_buffer_like().scrollback_len();
+                                            if pane.copy_mode_offset < max {
+                                                pane.copy_mode_offset += 1;
+                                            }
+                                        }
+                                        EditorCommand::Noop
+                                    }
+                                    KeyCode::Char('j') | KeyCode::Down => {
+                                        // Scroll down in copy mode
+                                        if let Some(pane) = self.state.tabs[self.state.active_tab].panes.get_pane_mut(focused_id) {
+                                            if pane.copy_mode_offset > 1 {
+                                                pane.copy_mode_offset -= 1;
+                                            }
+                                        }
+                                        EditorCommand::Noop
+                                    }
+                                    _ => EditorCommand::Noop,
+                                };
+                                if !matches!(cmd, EditorCommand::Noop) {
+                                    let screen_area = self.screen_area()?;
+                                    self.exec(cmd, screen_area);
+                                }
+                                continue;
+                            }
+                        }
+
                         // Any key dismisses hover
                         if self.state.hover_text.is_some() {
                             self.state.hover_text = None;

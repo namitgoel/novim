@@ -37,6 +37,7 @@ pub enum EditorMode {
     Visual,
     VisualBlock,
     Command,
+    Replace,
 }
 
 impl EditorMode {
@@ -47,6 +48,7 @@ impl EditorMode {
             EditorMode::Visual => "VISUAL",
             EditorMode::VisualBlock => "V-BLOCK",
             EditorMode::Command => "COMMAND",
+            EditorMode::Replace => "REPLACE",
         }
     }
 
@@ -57,6 +59,7 @@ impl EditorMode {
             EditorMode::Visual => "V",
             EditorMode::VisualBlock => "VB",
             EditorMode::Command => "C",
+            EditorMode::Replace => "R",
         }
     }
 
@@ -80,6 +83,10 @@ pub enum Direction {
     LineEnd,
     FileStart,
     FileEnd,
+    ParagraphForward,
+    ParagraphBackward,
+    SentenceForward,
+    SentenceBackward,
 }
 
 /// A text selection (anchor = where selection started, head = where cursor is now).

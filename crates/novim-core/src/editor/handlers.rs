@@ -194,9 +194,27 @@ impl EditorState {
                 }
                 Ok(ExecOutcome::Continue)
             }
+            EditorCommand::PasteBefore => {
+                let clip = self.paste_from_register();
+                if !clip.is_empty() {
+                    let buf = self.focused_buf_mut();
+                    let cursor_before = buf.cursor();
+                    for c in clip.chars() {
+                        buf.insert_char(c);
+                    }
+                    buf.break_undo_group();
+                    // Move cursor back to the original position
+                    buf.set_cursor_pos(cursor_before);
+                }
+                Ok(ExecOutcome::Continue)
+            }
             EditorCommand::SwitchMode(mode) => {
                 self.focused_buf_mut().break_undo_group();
                 if self.mode.is_visual() && !mode.is_visual() {
+                    // Save the selection for gv before clearing
+                    if let Some(sel) = self.focused_buf().selection() {
+                        self.last_visual_selection = Some(sel);
+                    }
                     self.focused_buf_mut().set_selection(None);
                 }
                 if mode == EditorMode::Normal {
@@ -210,6 +228,14 @@ impl EditorState {
             }
             EditorCommand::InsertChar(c) => {
                 self.focused_buf_mut().insert_char(c);
+                self.tabs[idx].notify_lsp_change();
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ReplaceInsertChar(c) => {
+                // Replace mode: overwrite char at cursor instead of inserting
+                if let crate::pane::PaneContent::Editor(buf) = &mut self.tabs[idx].panes.focused_pane_mut().content {
+                    buf.replace_insert_char(c);
+                }
                 self.tabs[idx].notify_lsp_change();
                 Ok(ExecOutcome::Continue)
             }
@@ -457,6 +483,30 @@ impl EditorState {
             }
             EditorCommand::ZoomPane => {
                 self.tabs[idx].panes.zoom_focused();
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::SwapPane => {
+                self.tabs[idx].panes.swap_focused_with_next();
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::EnterCopyMode => {
+                let focused_id = self.tabs[idx].panes.focused_id();
+                if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
+                    if pane.content.as_buffer_like().is_terminal() {
+                        pane.copy_mode_offset = 1; // enter copy mode at offset 1
+                        self.status_message = Some("Copy mode (q/Esc to exit, j/k to scroll)".to_string());
+                    } else {
+                        self.status_message = Some("Copy mode only works in terminal panes".to_string());
+                    }
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ExitCopyMode => {
+                let focused_id = self.tabs[idx].panes.focused_id();
+                if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
+                    pane.copy_mode_offset = 0;
+                }
+                self.status_message = None;
                 Ok(ExecOutcome::Continue)
             }
             _ => Ok(ExecOutcome::Continue),
@@ -881,9 +931,35 @@ impl EditorState {
         }
     }
 
-    pub(super) fn execute_scroll_buffer(&mut self, cmd: EditorCommand) -> Result<ExecOutcome, NovimError> {
+    pub(super) fn execute_scroll_buffer(&mut self, cmd: EditorCommand, screen_area: novim_types::Rect) -> Result<ExecOutcome, NovimError> {
         let idx = self.active_tab;
         match cmd {
+            EditorCommand::ScrollCenter => {
+                let focused_id = self.tabs[idx].panes.focused_id();
+                if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
+                    let cursor_line = pane.content.as_buffer_like().cursor().line;
+                    let half = (screen_area.height as usize) / 2;
+                    pane.viewport_offset = cursor_line.saturating_sub(half);
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ScrollTop => {
+                let focused_id = self.tabs[idx].panes.focused_id();
+                if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
+                    let cursor_line = pane.content.as_buffer_like().cursor().line;
+                    pane.viewport_offset = cursor_line;
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ScrollBottom => {
+                let focused_id = self.tabs[idx].panes.focused_id();
+                if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
+                    let cursor_line = pane.content.as_buffer_like().cursor().line;
+                    let height = screen_area.height as usize;
+                    pane.viewport_offset = cursor_line.saturating_sub(height.saturating_sub(1));
+                }
+                Ok(ExecOutcome::Continue)
+            }
             EditorCommand::ScrollUp => {
                 let n = self.config.editor.scroll_lines;
                 let focused_id = self.tabs[idx].panes.focused_id();
@@ -910,6 +986,33 @@ impl EditorState {
                             novim_types::Position::new(pane.viewport_offset, cursor.column),
                         );
                     }
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::PageUp => {
+                let page_height = screen_area.height.saturating_sub(2) as usize; // leave status/tab lines
+                let focused_id = self.tabs[idx].panes.focused_id();
+                if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
+                    pane.viewport_offset = pane.viewport_offset.saturating_sub(page_height);
+                    let cursor = pane.content.as_buffer_like().cursor();
+                    let new_line = cursor.line.saturating_sub(page_height);
+                    pane.content.as_buffer_like_mut().set_cursor_pos(
+                        novim_types::Position::new(new_line, cursor.column),
+                    );
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::PageDown => {
+                let page_height = screen_area.height.saturating_sub(2) as usize;
+                let focused_id = self.tabs[idx].panes.focused_id();
+                if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
+                    let max = pane.content.as_buffer_like().len_lines().saturating_sub(1);
+                    pane.viewport_offset = (pane.viewport_offset + page_height).min(max);
+                    let cursor = pane.content.as_buffer_like().cursor();
+                    let new_line = (cursor.line + page_height).min(max);
+                    pane.content.as_buffer_like_mut().set_cursor_pos(
+                        novim_types::Position::new(new_line, cursor.column),
+                    );
                 }
                 Ok(ExecOutcome::Continue)
             }
@@ -1022,6 +1125,18 @@ impl EditorState {
                     }
                 } else {
                     self.status_message = Some(format!("Mark '{}' not set", c));
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ListMarks => {
+                let mut items: Vec<String> = self.marks.iter()
+                    .map(|(k, (path, pos))| format!("'{}  {}:{}:{}", k, path, pos.line + 1, pos.column + 1))
+                    .collect();
+                items.sort();
+                if items.is_empty() {
+                    self.status_message = Some("No marks set".to_string());
+                } else {
+                    self.status_message = Some(items.join(" | "));
                 }
                 Ok(ExecOutcome::Continue)
             }

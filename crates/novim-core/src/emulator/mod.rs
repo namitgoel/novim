@@ -118,7 +118,18 @@ impl TerminalPane {
 
     /// Get the shell's current working directory.
     /// Uses /proc on Linux, proc_pidinfo on macOS (instant, no lsof).
+    /// Falls back to OSC 7 if the OS method fails.
     pub fn shell_cwd(&self) -> Option<std::path::PathBuf> {
+        // Try OS-level detection first
+        if let Some(result) = self.shell_cwd_os() {
+            return Some(result);
+        }
+        // Fall back to OSC 7 reported CWD
+        self.grid.osc7_cwd.as_ref().map(std::path::PathBuf::from)
+    }
+
+    /// OS-level CWD detection via /proc or proc_pidinfo.
+    fn shell_cwd_os(&self) -> Option<std::path::PathBuf> {
         let pid = self.child_pid?;
 
         #[cfg(target_os = "macos")]
@@ -292,10 +303,12 @@ impl PaneDisplay for TerminalPane {
             Direction::Down => self.write_to_pty(b"\x1b[B"),
             Direction::Right => self.write_to_pty(b"\x1b[C"),
             Direction::Left => self.write_to_pty(b"\x1b[D"),
-            // Word/line/file motions are editor-only, no-op for terminals
+            // Word/line/file/paragraph/sentence motions are editor-only, no-op for terminals
             Direction::WordForward | Direction::WordBackward | Direction::WordEnd
             | Direction::LineStart | Direction::LineEnd
-            | Direction::FileStart | Direction::FileEnd => {}
+            | Direction::FileStart | Direction::FileEnd
+            | Direction::ParagraphForward | Direction::ParagraphBackward
+            | Direction::SentenceForward | Direction::SentenceBackward => {}
         }
     }
 
