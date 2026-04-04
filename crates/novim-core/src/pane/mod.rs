@@ -275,6 +275,8 @@ pub struct PaneManager {
     focused_id: PaneId,
     next_id: PaneId,
     count: usize,
+    /// When Some, the focused pane is "zoomed" (temporarily full-screen).
+    zoomed_pane: Option<PaneId>,
 }
 
 impl PaneManager {
@@ -285,6 +287,7 @@ impl PaneManager {
             focused_id: 0,
             next_id: 1,
             count: 1,
+            zoomed_pane: None,
         }
     }
 
@@ -305,6 +308,7 @@ impl PaneManager {
             focused_id: focused,
             next_id: max_id + 1,
             count,
+            zoomed_pane: None,
         }
     }
 
@@ -316,6 +320,7 @@ impl PaneManager {
             focused_id: 0,
             next_id: 1,
             count: 1,
+            zoomed_pane: None,
         })
     }
 
@@ -355,9 +360,95 @@ impl PaneManager {
     }
 
     pub fn layout(&self, area: Rect) -> Vec<(PaneId, Rect)> {
+        if let Some(zoomed_id) = self.zoomed_pane {
+            return vec![(zoomed_id, area)];
+        }
         let mut result = Vec::new();
         self.root.layout(area, &mut result);
         result
+    }
+
+    /// Resize the nearest ancestor split of the focused pane.
+    /// If `horizontal` is true, look for a Horizontal split (adjusts height);
+    /// otherwise look for a Vertical split (adjusts width).
+    /// `delta` is added to the ratio (positive = grow first child, negative = shrink).
+    pub fn resize_focused(&mut self, delta: f64, horizontal: bool) {
+        let target_dir = if horizontal {
+            SplitDirection::Horizontal
+        } else {
+            SplitDirection::Vertical
+        };
+        Self::adjust_ancestor_ratio(&mut self.root, self.focused_id, target_dir, delta);
+    }
+
+    /// Recursively find the nearest ancestor Split (matching `target_dir`) that
+    /// contains `pane_id`, and adjust its ratio by `delta`.
+    /// Returns true if the pane was found in this subtree.
+    fn adjust_ancestor_ratio(
+        node: &mut PaneNode,
+        pane_id: PaneId,
+        target_dir: SplitDirection,
+        delta: f64,
+    ) -> bool {
+        match node {
+            PaneNode::Leaf(pane) => pane.id == pane_id,
+            PaneNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                let in_first = Self::contains_pane(first, pane_id);
+                let in_second = Self::contains_pane(second, pane_id);
+                if !in_first && !in_second {
+                    return false;
+                }
+                // If this split matches the target direction and spans the focused pane,
+                // adjust the ratio here.
+                if *direction == target_dir {
+                    let adjust = if in_first { delta } else { -delta };
+                    *ratio = (*ratio + adjust).clamp(0.1, 0.9);
+                    return true;
+                }
+                // Otherwise recurse into the child that contains the pane.
+                if in_first {
+                    Self::adjust_ancestor_ratio(first, pane_id, target_dir, delta);
+                } else {
+                    Self::adjust_ancestor_ratio(second, pane_id, target_dir, delta);
+                }
+                true
+            }
+        }
+    }
+
+    /// Check whether a subtree contains a pane with the given ID.
+    fn contains_pane(node: &PaneNode, pane_id: PaneId) -> bool {
+        match node {
+            PaneNode::Leaf(pane) => pane.id == pane_id,
+            PaneNode::Split { first, second, .. } => {
+                Self::contains_pane(first, pane_id) || Self::contains_pane(second, pane_id)
+            }
+        }
+    }
+
+    /// Toggle zoom on the focused pane. When zoomed, `layout()` returns only
+    /// the focused pane at full size. Toggling again restores the normal BSP layout.
+    pub fn zoom_focused(&mut self) {
+        if self.zoomed_pane.is_some() {
+            self.zoomed_pane = None;
+        } else {
+            self.zoomed_pane = Some(self.focused_id);
+        }
+    }
+
+    /// Returns true if a pane is currently zoomed.
+    pub fn is_zoomed(&self) -> bool {
+        self.zoomed_pane.is_some()
+    }
+
+    /// Unzoom: restore normal BSP layout.
+    pub fn unzoom(&mut self) {
+        self.zoomed_pane = None;
     }
 
     /// Split focused pane, new pane gets an empty editor buffer.

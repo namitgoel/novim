@@ -75,6 +75,11 @@ pub struct EditorState {
     pub(crate) insert_record: Vec<EditorCommand>,
     /// Plugin system manager.
     pub plugins: PluginManager,
+    /// Last f/F/t/T find for ; and , repeat.
+    pub last_find_char: Option<(char, bool, bool)>,
+    /// Command-line history for up/down recall.
+    pub command_history: Vec<String>,
+    pub command_history_idx: usize,
 }
 
 impl EditorState {
@@ -149,6 +154,9 @@ impl EditorState {
             recording_insert: false,
             insert_record: Vec::new(),
             plugins,
+            last_find_char: None,
+            command_history: Vec::new(),
+            command_history_idx: 0,
         }
     }
 
@@ -310,7 +318,12 @@ impl EditorState {
             | EditorCommand::MoveCursorN(..)
             | EditorCommand::AddCursorAbove
             | EditorCommand::AddCursorBelow
-            | EditorCommand::ClearSecondaryCursors => self.execute_navigation(cmd),
+            | EditorCommand::ClearSecondaryCursors
+            | EditorCommand::FindChar(..)
+            | EditorCommand::TillChar(..)
+            | EditorCommand::RepeatFindChar
+            | EditorCommand::RepeatFindCharReverse
+            | EditorCommand::MatchBracket => self.execute_navigation(cmd),
 
             // Folds
             EditorCommand::ToggleFold
@@ -339,7 +352,20 @@ impl EditorState {
             | EditorCommand::DeleteLines(..)
             | EditorCommand::ChangeLines(..)
             | EditorCommand::DeleteTextObject(..)
-            | EditorCommand::ChangeTextObject(..) => self.execute_editing(cmd, screen_area),
+            | EditorCommand::ChangeTextObject(..)
+            | EditorCommand::ReplaceChar(..)
+            | EditorCommand::DeleteCharForward
+            | EditorCommand::OpenLineBelow
+            | EditorCommand::OpenLineAbove
+            | EditorCommand::AppendEndOfLine
+            | EditorCommand::InsertStartOfLine
+            | EditorCommand::ChangeToEnd
+            | EditorCommand::DeleteToEnd
+            | EditorCommand::SubstituteLine
+            | EditorCommand::JoinLines(..)
+            | EditorCommand::Indent(..)
+            | EditorCommand::Dedent(..)
+            | EditorCommand::ToggleCase => self.execute_editing(cmd, screen_area),
 
             // Panes
             EditorCommand::SplitPane(..)
@@ -347,13 +373,20 @@ impl EditorState {
             | EditorCommand::FocusNext
             | EditorCommand::ClosePane
             | EditorCommand::OpenTerminal
-            | EditorCommand::ForwardToTerminal(..) => self.execute_pane(cmd, screen_area),
+            | EditorCommand::ForwardToTerminal(..)
+            | EditorCommand::ResizePaneGrow
+            | EditorCommand::ResizePaneShrink
+            | EditorCommand::ResizePaneWider
+            | EditorCommand::ResizePaneNarrower
+            | EditorCommand::ZoomPane => self.execute_pane(cmd, screen_area),
 
             // Command mode
             EditorCommand::CommandInput(..)
             | EditorCommand::CommandBackspace
             | EditorCommand::CommandExecute
-            | EditorCommand::CommandCancel => self.execute_command_mode(cmd, screen_area),
+            | EditorCommand::CommandCancel
+            | EditorCommand::CommandHistoryUp
+            | EditorCommand::CommandHistoryDown => self.execute_command_mode(cmd, screen_area),
 
             // Finder
             EditorCommand::OpenFileFinder
@@ -402,7 +435,9 @@ impl EditorState {
             | EditorCommand::NextMatch
             | EditorCommand::PrevMatch
             | EditorCommand::ClearSearch
-            | EditorCommand::ReplaceAll(..) => self.execute_search(cmd),
+            | EditorCommand::ReplaceAll(..)
+            | EditorCommand::SearchWordForward
+            | EditorCommand::SearchWordBackward => self.execute_search(cmd),
 
             // Scroll / buffer
             EditorCommand::ScrollUp
@@ -525,6 +560,60 @@ impl EditorState {
                 };
                 self.plugins.reload_file(&resolved);
                 self.status_message = Some(format!("Reloaded: {}", resolved.display()));
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ShellCommand(cmd) => {
+                match std::process::Command::new("sh")
+                    .args(["-c", &cmd])
+                    .output()
+                {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        let result = if !stdout.is_empty() {
+                            stdout.trim().to_string()
+                        } else if !stderr.is_empty() {
+                            format!("Error: {}", stderr.trim())
+                        } else {
+                            "Command completed".to_string()
+                        };
+                        self.status_message = Some(result);
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Shell error: {}", e));
+                    }
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::OpenUrlUnderCursor => {
+                let cursor = self.focused_buf().cursor();
+                if let Some(line) = self.focused_buf().get_line(cursor.line) {
+                    if let Some(url) = crate::url::url_at_position(&line, cursor.column) {
+                        crate::url::open_url(&url);
+                        self.status_message = Some(format!("Opening: {}", url));
+                    } else {
+                        self.status_message = Some("No URL at cursor".to_string());
+                    }
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::OpenFileUnderCursor => {
+                if let Some(word) = self.focused_buf().word_at_cursor() {
+                    let idx = self.active_tab;
+                    let base = self.tabs[idx].shell_cwd();
+                    let path = if std::path::Path::new(&word).is_absolute() {
+                        std::path::PathBuf::from(&word)
+                    } else {
+                        base.join(&word)
+                    };
+                    if path.exists() && path.is_file() {
+                        self.push_jump();
+                        let path_str = path.to_string_lossy().to_string();
+                        return self.handle_edit_file(&path_str);
+                    } else {
+                        self.status_message = Some(format!("File not found: {}", word));
+                    }
+                }
                 Ok(ExecOutcome::Continue)
             }
             EditorCommand::Noop => Ok(ExecOutcome::Continue),

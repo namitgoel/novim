@@ -38,6 +38,8 @@ pub trait PaneDisplay {
     fn unfold_all(&mut self) {}
     fn recompute_folds(&mut self, _tab_width: usize) {}
     fn git_sign(&self, _line: usize) -> Option<crate::plugin::GutterSign> { None }
+    fn word_at_cursor(&self) -> Option<String> { None }
+    fn find_matching_bracket(&self) -> Option<Position> { None }
 }
 
 /// Text editing operations (insert, delete, undo/redo, save).
@@ -65,6 +67,14 @@ pub trait TextEditing {
     fn find_inner_bracket(&self, _open: char, _close: char) -> Option<(usize, usize)> { None }
     fn find_around_bracket(&self, _open: char, _close: char) -> Option<(usize, usize)> { None }
     fn delete_text_range(&mut self, _start: usize, _end: usize) -> Option<String> { None }
+    fn delete_char_forward(&mut self) {}
+    fn replace_char(&mut self, _c: char) {}
+    fn join_lines(&mut self, _n: usize) {}
+    fn open_line_below(&mut self) -> Option<Position> { None }
+    fn open_line_above(&mut self) -> Option<Position> { None }
+    fn indent_lines(&mut self, _n: usize, _tab_width: usize, _expand_tab: bool) {}
+    fn dedent_lines(&mut self, _n: usize, _tab_width: usize) {}
+    fn toggle_case_at_cursor(&mut self) {}
 }
 
 /// Search and replace operations.
@@ -81,6 +91,8 @@ pub trait TerminalLike {
     fn poll_pty(&mut self) -> bool { false }
     fn get_styled_cells(&self, _row: usize) -> Option<&[crate::emulator::grid::Cell]> { None }
     fn shell_cwd(&self) -> Option<std::path::PathBuf> { None }
+    fn scrollback_len(&self) -> usize { 0 }
+    fn scrollback_line(&self, _offset: usize) -> Option<&[crate::emulator::grid::Cell]> { None }
 }
 
 /// Unified trait combining all sub-traits. All pane content implements this.
@@ -693,6 +705,95 @@ impl PaneDisplay for Buffer {
     fn git_sign(&self, line: usize) -> Option<crate::plugin::GutterSign> {
         self.git_signs.get(&line).copied()
     }
+
+    fn word_at_cursor(&self) -> Option<String> {
+        let total = self.rope.len_chars();
+        if total == 0 {
+            return None;
+        }
+        let idx = self.cursor_to_char_idx().min(total - 1);
+        let c = self.rope.char(idx);
+        if !c.is_alphanumeric() && c != '_' {
+            return None;
+        }
+        // Expand backward
+        let mut start = idx;
+        while start > 0 {
+            let prev = self.rope.char(start - 1);
+            if prev.is_alphanumeric() || prev == '_' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        // Expand forward
+        let mut end = idx + 1;
+        while end < total {
+            let next = self.rope.char(end);
+            if next.is_alphanumeric() || next == '_' {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+        Some(self.rope.slice(start..end).to_string())
+    }
+
+    fn find_matching_bracket(&self) -> Option<Position> {
+        let total = self.rope.len_chars();
+        if total == 0 {
+            return None;
+        }
+        let idx = self.cursor_to_char_idx();
+        if idx >= total {
+            return None;
+        }
+        let c = self.rope.char(idx);
+
+        let (open, close, forward) = match c {
+            '(' => ('(', ')', true),
+            '{' => ('{', '}', true),
+            '[' => ('[', ']', true),
+            ')' => ('(', ')', false),
+            '}' => ('{', '}', false),
+            ']' => ('[', ']', false),
+            _ => return None,
+        };
+
+        if forward {
+            let mut depth = 0i32;
+            for i in (idx + 1)..total {
+                let ch = self.rope.char(i);
+                if ch == open {
+                    depth += 1;
+                } else if ch == close {
+                    if depth == 0 {
+                        return Some(self.char_idx_to_position(i));
+                    }
+                    depth -= 1;
+                }
+            }
+        } else {
+            let mut depth = 0i32;
+            let mut i = idx;
+            loop {
+                if i == 0 {
+                    break;
+                }
+                i -= 1;
+                let ch = self.rope.char(i);
+                if ch == close {
+                    depth += 1;
+                } else if ch == open {
+                    if depth == 0 {
+                        return Some(self.char_idx_to_position(i));
+                    }
+                    depth -= 1;
+                }
+            }
+        }
+        None
+    }
 }
 
 impl TextEditing for Buffer {
@@ -1037,6 +1138,285 @@ impl TextEditing for Buffer {
     fn find_inner_bracket(&self, open: char, close: char) -> Option<(usize, usize)> { Buffer::find_inner_bracket(self, open, close) }
     fn find_around_bracket(&self, open: char, close: char) -> Option<(usize, usize)> { Buffer::find_around_bracket(self, open, close) }
     fn delete_text_range(&mut self, start: usize, end: usize) -> Option<String> { Buffer::delete_text_range(self, start, end) }
+
+    fn delete_char_forward(&mut self) {
+        let char_idx = self.cursor_to_char_idx();
+        if char_idx >= self.rope.len_chars() {
+            return;
+        }
+        let c = self.rope.char(char_idx);
+        // Don't delete if at end of line (on newline char) — vim `x` stops at line end
+        if c == '\n' {
+            return;
+        }
+        let deleted = c.to_string();
+        self.ensure_undo_group();
+        if let Some(group) = &mut self.current_group {
+            group.ops.push(EditOp::Delete {
+                char_idx,
+                content: deleted,
+            });
+        }
+        self.redo_stack.clear();
+        self.rope.remove(char_idx..char_idx + 1);
+        self.dirty = true;
+        self.highlights_dirty = true;
+        self.version += 1;
+        self.invalidate_text_cache();
+        // Clamp cursor if we deleted the last char on the line
+        self.clamp_cursor_column();
+    }
+
+    fn replace_char(&mut self, c: char) {
+        let char_idx = self.cursor_to_char_idx();
+        if char_idx >= self.rope.len_chars() {
+            return;
+        }
+        let old_char = self.rope.char(char_idx);
+        if old_char == '\n' {
+            return;
+        }
+        self.ensure_undo_group();
+        if let Some(group) = &mut self.current_group {
+            group.ops.push(EditOp::Delete {
+                char_idx,
+                content: old_char.to_string(),
+            });
+            group.ops.push(EditOp::Insert {
+                char_idx,
+                content: c.to_string(),
+            });
+        }
+        self.redo_stack.clear();
+        self.rope.remove(char_idx..char_idx + 1);
+        self.rope.insert_char(char_idx, c);
+        self.dirty = true;
+        self.highlights_dirty = true;
+        self.version += 1;
+        self.invalidate_text_cache();
+    }
+
+    fn join_lines(&mut self, n: usize) {
+        for _ in 0..n {
+            let total_lines = self.rope.len_lines();
+            if self.cursor.line + 1 >= total_lines {
+                break;
+            }
+            // Find end of current line (the newline char)
+            let line_end = self.rope.line_to_char(self.cursor.line) + self.line_len(self.cursor.line);
+            if line_end >= self.rope.len_chars() {
+                break;
+            }
+            // The newline character is at line_end
+            let newline_idx = line_end;
+
+            // Count leading whitespace on the next line
+            let next_line_start = self.rope.line_to_char(self.cursor.line + 1);
+            let mut ws_count = 0usize;
+            let next_line_chars = self.rope.len_chars();
+            let mut idx = next_line_start;
+            while idx < next_line_chars {
+                let ch = self.rope.char(idx);
+                if ch == ' ' || ch == '\t' {
+                    ws_count += 1;
+                    idx += 1;
+                } else {
+                    break;
+                }
+            }
+
+            // Delete from the newline through the leading whitespace
+            let delete_start = newline_idx;
+            let delete_end = next_line_start + ws_count;
+            let deleted = self.rope.slice(delete_start..delete_end).to_string();
+
+            self.ensure_undo_group();
+            if let Some(group) = &mut self.current_group {
+                group.ops.push(EditOp::Delete {
+                    char_idx: delete_start,
+                    content: deleted,
+                });
+                // Insert a single space to replace the join
+                group.ops.push(EditOp::Insert {
+                    char_idx: delete_start,
+                    content: " ".to_string(),
+                });
+            }
+            self.redo_stack.clear();
+            self.rope.remove(delete_start..delete_end);
+            self.rope.insert_char(delete_start, ' ');
+            self.dirty = true;
+            self.highlights_dirty = true;
+            self.version += 1;
+            self.invalidate_text_cache();
+        }
+    }
+
+    fn open_line_below(&mut self) -> Option<Position> {
+        let line_end = self.rope.line_to_char(self.cursor.line) + self.line_len(self.cursor.line);
+        let insert_idx = line_end;
+
+        self.ensure_undo_group();
+        if let Some(group) = &mut self.current_group {
+            group.ops.push(EditOp::Insert {
+                char_idx: insert_idx,
+                content: "\n".to_string(),
+            });
+        }
+        self.redo_stack.clear();
+        self.rope.insert_char(insert_idx, '\n');
+        self.dirty = true;
+        self.highlights_dirty = true;
+        self.version += 1;
+        self.invalidate_text_cache();
+
+        let new_pos = Position::new(self.cursor.line + 1, 0);
+        self.cursor = new_pos;
+        Some(new_pos)
+    }
+
+    fn open_line_above(&mut self) -> Option<Position> {
+        let line_start = self.rope.line_to_char(self.cursor.line);
+
+        self.ensure_undo_group();
+        if let Some(group) = &mut self.current_group {
+            group.ops.push(EditOp::Insert {
+                char_idx: line_start,
+                content: "\n".to_string(),
+            });
+        }
+        self.redo_stack.clear();
+        self.rope.insert_char(line_start, '\n');
+        self.dirty = true;
+        self.highlights_dirty = true;
+        self.version += 1;
+        self.invalidate_text_cache();
+
+        // Cursor stays on the same line number (the newly inserted blank line)
+        let new_pos = Position::new(self.cursor.line, 0);
+        self.cursor = new_pos;
+        Some(new_pos)
+    }
+
+    fn indent_lines(&mut self, n: usize, tab_width: usize, expand_tab: bool) {
+        let indent_str = if expand_tab {
+            " ".repeat(tab_width)
+        } else {
+            "\t".to_string()
+        };
+        let total_lines = self.rope.len_lines();
+        for i in 0..n {
+            let line = self.cursor.line + i;
+            if line >= total_lines {
+                break;
+            }
+            let line_start = self.rope.line_to_char(line);
+            self.ensure_undo_group();
+            if let Some(group) = &mut self.current_group {
+                group.ops.push(EditOp::Insert {
+                    char_idx: line_start,
+                    content: indent_str.clone(),
+                });
+            }
+            self.rope.insert(line_start, &indent_str);
+        }
+        self.redo_stack.clear();
+        self.dirty = true;
+        self.highlights_dirty = true;
+        self.version += 1;
+        self.invalidate_text_cache();
+    }
+
+    fn dedent_lines(&mut self, n: usize, tab_width: usize) {
+        let total_lines = self.rope.len_lines();
+        for i in 0..n {
+            let line = self.cursor.line + i;
+            if line >= total_lines {
+                break;
+            }
+            let line_start = self.rope.line_to_char(line);
+            let line_content = self.rope.line(line);
+            let line_len = line_content.len_chars();
+
+            // Count leading whitespace to remove (up to tab_width chars)
+            let mut remove_count = 0usize;
+            for j in 0..line_len.min(tab_width) {
+                let ch = self.rope.char(line_start + j);
+                if ch == '\t' {
+                    remove_count = j + 1;
+                    break;
+                } else if ch == ' ' {
+                    remove_count = j + 1;
+                } else {
+                    break;
+                }
+            }
+
+            if remove_count > 0 {
+                let deleted = self.rope.slice(line_start..line_start + remove_count).to_string();
+                self.ensure_undo_group();
+                if let Some(group) = &mut self.current_group {
+                    group.ops.push(EditOp::Delete {
+                        char_idx: line_start,
+                        content: deleted,
+                    });
+                }
+                self.rope.remove(line_start..line_start + remove_count);
+            }
+        }
+        self.redo_stack.clear();
+        self.dirty = true;
+        self.highlights_dirty = true;
+        self.version += 1;
+        self.invalidate_text_cache();
+        self.clamp_cursor_column();
+    }
+
+    fn toggle_case_at_cursor(&mut self) {
+        let char_idx = self.cursor_to_char_idx();
+        if char_idx >= self.rope.len_chars() {
+            return;
+        }
+        let c = self.rope.char(char_idx);
+        if c == '\n' || !c.is_alphabetic() {
+            // Still advance cursor for non-alpha (vim behavior)
+            let line_len = self.line_len(self.cursor.line);
+            if self.cursor.column + 1 < line_len {
+                self.cursor.column += 1;
+            }
+            return;
+        }
+        let toggled: char = if c.is_uppercase() {
+            c.to_lowercase().next().unwrap_or(c)
+        } else {
+            c.to_uppercase().next().unwrap_or(c)
+        };
+
+        self.ensure_undo_group();
+        if let Some(group) = &mut self.current_group {
+            group.ops.push(EditOp::Delete {
+                char_idx,
+                content: c.to_string(),
+            });
+            group.ops.push(EditOp::Insert {
+                char_idx,
+                content: toggled.to_string(),
+            });
+        }
+        self.redo_stack.clear();
+        self.rope.remove(char_idx..char_idx + 1);
+        self.rope.insert_char(char_idx, toggled);
+        self.dirty = true;
+        self.highlights_dirty = true;
+        self.version += 1;
+        self.invalidate_text_cache();
+
+        // Advance cursor
+        let line_len = self.line_len(self.cursor.line);
+        if self.cursor.column + 1 < line_len {
+            self.cursor.column += 1;
+        }
+    }
 }
 
 impl Searchable for Buffer {

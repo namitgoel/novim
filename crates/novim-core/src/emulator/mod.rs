@@ -259,6 +259,16 @@ impl TerminalPane {
         }
     }
 
+    /// Number of scrollback history lines available.
+    pub fn scrollback_len(&self) -> usize {
+        self.grid.history_len()
+    }
+
+    /// Get a line from scrollback history (0 = most recent scrolled-off line).
+    pub fn scrollback_line(&self, offset: usize) -> Option<&[grid::Cell]> {
+        self.grid.history_line(offset)
+    }
+
     /// Resize the PTY and grid.
     pub fn resize(&mut self, rows: u16, cols: u16) {
         let _ = self.master.resize(PtySize {
@@ -333,5 +343,13 @@ impl TerminalLike for TerminalPane {
 
     fn get_styled_cells(&self, row: usize) -> Option<&[grid::Cell]> {
         self.grid.get_cells(row)
+    }
+
+    fn scrollback_len(&self) -> usize {
+        self.grid.history_len()
+    }
+
+    fn scrollback_line(&self, offset: usize) -> Option<&[grid::Cell]> {
+        self.grid.history_line(offset)
     }
 }

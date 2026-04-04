@@ -1,5 +1,7 @@
 //! Terminal grid — a 2D array of styled cells representing a virtual screen.
 
+use std::collections::VecDeque;
+
 /// ANSI color
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum CellColor {
@@ -81,6 +83,10 @@ pub struct Grid {
     /// Scroll region: top and bottom row (inclusive). None = full screen.
     scroll_top: usize,
     scroll_bottom: usize,
+    /// Scrollback history — lines that scrolled off the top of the screen.
+    history: VecDeque<Vec<Cell>>,
+    /// Maximum history lines to keep.
+    max_history: usize,
 }
 
 impl Grid {
@@ -98,6 +104,8 @@ impl Grid {
             saved_screen: None,
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
+            history: VecDeque::new(),
+            max_history: 10_000,
         }
     }
 
@@ -200,6 +208,15 @@ impl Grid {
         if self.cursor_row >= self.scroll_bottom {
             // Scroll the scroll region up by one line.
             if self.scroll_top < self.rows && self.scroll_bottom < self.rows {
+                // Save the departing top line to scrollback history
+                // (only when scrolling the full screen, not alternate screen).
+                if self.scroll_top == 0 && self.saved_screen.is_none() {
+                    let departing = self.cells[0].clone();
+                    self.history.push_back(departing);
+                    if self.history.len() > self.max_history {
+                        self.history.pop_front();
+                    }
+                }
                 self.cells.remove(self.scroll_top);
                 self.cells.insert(self.scroll_bottom, vec![Cell::default(); self.cols]);
             }
@@ -432,6 +449,22 @@ impl Grid {
     pub fn get_cells(&self, row: usize) -> Option<&[Cell]> {
         if row < self.rows {
             Some(&self.cells[row])
+        } else {
+            None
+        }
+    }
+
+    // --- Scrollback history ---
+
+    /// Number of scrollback lines available.
+    pub fn history_len(&self) -> usize {
+        self.history.len()
+    }
+
+    /// Get a line from scrollback history (0 = most recent scrolled-off line).
+    pub fn history_line(&self, offset: usize) -> Option<&[Cell]> {
+        if offset < self.history.len() {
+            Some(&self.history[self.history.len() - 1 - offset])
         } else {
             None
         }

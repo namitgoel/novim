@@ -52,6 +52,62 @@ impl EditorState {
                 self.focused_buf_mut().clear_secondary_cursors();
                 Ok(ExecOutcome::Continue)
             }
+            EditorCommand::FindChar(c, forward) => {
+                self.last_find_char = Some((c, forward, true));
+                let cursor = self.focused_buf().cursor();
+                let line = self.focused_buf().get_line(cursor.line).unwrap_or_default();
+                let new_col = if forward {
+                    line[cursor.column + 1..].find(c).map(|i| cursor.column + 1 + i)
+                } else {
+                    line[..cursor.column].rfind(c)
+                };
+                if let Some(col) = new_col {
+                    self.focused_buf_mut().set_cursor_pos(novim_types::Position::new(cursor.line, col));
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::TillChar(c, forward) => {
+                self.last_find_char = Some((c, forward, false));
+                let cursor = self.focused_buf().cursor();
+                let line = self.focused_buf().get_line(cursor.line).unwrap_or_default();
+                let new_col = if forward {
+                    line[cursor.column + 1..].find(c).map(|i| cursor.column + i)
+                } else {
+                    line[..cursor.column].rfind(c).map(|i| i + 1)
+                };
+                if let Some(col) = new_col {
+                    self.focused_buf_mut().set_cursor_pos(novim_types::Position::new(cursor.line, col));
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::RepeatFindChar => {
+                if let Some((c, forward, inclusive)) = self.last_find_char {
+                    let cmd = if inclusive {
+                        EditorCommand::FindChar(c, forward)
+                    } else {
+                        EditorCommand::TillChar(c, forward)
+                    };
+                    return self.execute_navigation(cmd);
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::RepeatFindCharReverse => {
+                if let Some((c, forward, inclusive)) = self.last_find_char {
+                    let cmd = if inclusive {
+                        EditorCommand::FindChar(c, !forward)
+                    } else {
+                        EditorCommand::TillChar(c, !forward)
+                    };
+                    return self.execute_navigation(cmd);
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::MatchBracket => {
+                if let Some(pos) = self.focused_buf().find_matching_bracket() {
+                    self.focused_buf_mut().set_cursor_pos(pos);
+                }
+                Ok(ExecOutcome::Continue)
+            }
             _ => Ok(ExecOutcome::Continue),
         }
     }
@@ -246,6 +302,111 @@ impl EditorState {
                 }
                 Ok(ExecOutcome::Continue)
             }
+            EditorCommand::DeleteCharForward => {
+                self.focused_buf_mut().delete_char_forward();
+                self.focused_buf_mut().break_undo_group();
+                self.tabs[idx].notify_lsp_change();
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ReplaceChar(c) => {
+                self.focused_buf_mut().replace_char(c);
+                self.focused_buf_mut().break_undo_group();
+                self.tabs[idx].notify_lsp_change();
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::OpenLineBelow => {
+                if let Some(pos) = self.focused_buf_mut().open_line_below() {
+                    self.focused_buf_mut().set_cursor_pos(pos);
+                    self.focused_buf_mut().break_undo_group();
+                    self.tabs[idx].notify_lsp_change();
+                }
+                self.mode = EditorMode::Insert;
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::OpenLineAbove => {
+                if let Some(pos) = self.focused_buf_mut().open_line_above() {
+                    self.focused_buf_mut().set_cursor_pos(pos);
+                    self.focused_buf_mut().break_undo_group();
+                    self.tabs[idx].notify_lsp_change();
+                }
+                self.mode = EditorMode::Insert;
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::AppendEndOfLine => {
+                self.focused_buf_mut().move_cursor(novim_types::Direction::LineEnd);
+                self.mode = EditorMode::Insert;
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::InsertStartOfLine => {
+                self.focused_buf_mut().move_cursor(novim_types::Direction::LineStart);
+                // Skip leading whitespace
+                let cursor = self.focused_buf().cursor();
+                if let Some(line) = self.focused_buf().get_line(cursor.line) {
+                    let first_non_blank = line.chars().take_while(|c| c.is_whitespace()).count();
+                    self.focused_buf_mut().set_cursor_pos(
+                        novim_types::Position::new(cursor.line, first_non_blank),
+                    );
+                }
+                self.mode = EditorMode::Insert;
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ChangeToEnd => {
+                // Delete from cursor to end of line, enter insert
+                self.focused_buf_mut().delete_motion(novim_types::Direction::LineEnd, 1);
+                self.focused_buf_mut().break_undo_group();
+                self.tabs[idx].notify_lsp_change();
+                self.mode = EditorMode::Insert;
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::DeleteToEnd => {
+                // Delete from cursor to end of line
+                if let Some(deleted) = {
+                    let buf = self.focused_buf_mut();
+                    buf.delete_motion(novim_types::Direction::LineEnd, 1);
+                    buf.break_undo_group();
+                    None::<String> // delete_motion doesn't return text, just track
+                } {
+                    self.yank_to_register(&deleted);
+                }
+                self.tabs[idx].notify_lsp_change();
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::SubstituteLine => {
+                // Delete line content (keep newline), enter insert
+                let buf = self.focused_buf_mut();
+                buf.delete_lines(1);
+                buf.break_undo_group();
+                self.tabs[idx].notify_lsp_change();
+                self.mode = EditorMode::Insert;
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::JoinLines(n) => {
+                self.focused_buf_mut().join_lines(n);
+                self.focused_buf_mut().break_undo_group();
+                self.tabs[idx].notify_lsp_change();
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ToggleCase => {
+                self.focused_buf_mut().toggle_case_at_cursor();
+                self.focused_buf_mut().break_undo_group();
+                self.tabs[idx].notify_lsp_change();
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::Indent(n) => {
+                let tw = self.config.editor.tab_width;
+                let et = self.config.editor.expand_tab;
+                self.focused_buf_mut().indent_lines(n, tw, et);
+                self.focused_buf_mut().break_undo_group();
+                self.tabs[idx].notify_lsp_change();
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::Dedent(n) => {
+                let tw = self.config.editor.tab_width;
+                self.focused_buf_mut().dedent_lines(n, tw);
+                self.focused_buf_mut().break_undo_group();
+                self.tabs[idx].notify_lsp_change();
+                Ok(ExecOutcome::Continue)
+            }
             _ => Ok(ExecOutcome::Continue),
         }
     }
@@ -278,6 +439,26 @@ impl EditorState {
                 self.focused_buf_mut().send_key(key);
                 Ok(ExecOutcome::Continue)
             }
+            EditorCommand::ResizePaneGrow => {
+                self.tabs[idx].panes.resize_focused(0.05, true);
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ResizePaneShrink => {
+                self.tabs[idx].panes.resize_focused(-0.05, true);
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ResizePaneWider => {
+                self.tabs[idx].panes.resize_focused(0.05, false);
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ResizePaneNarrower => {
+                self.tabs[idx].panes.resize_focused(-0.05, false);
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ZoomPane => {
+                self.tabs[idx].panes.zoom_focused();
+                Ok(ExecOutcome::Continue)
+            }
             _ => Ok(ExecOutcome::Continue),
         }
     }
@@ -300,13 +481,35 @@ impl EditorState {
             }
             EditorCommand::CommandExecute => {
                 let cmd_str = self.command_buffer.clone();
+                if !cmd_str.is_empty() {
+                    self.command_history.push(cmd_str.clone());
+                }
+                self.command_history_idx = self.command_history.len();
                 self.mode = EditorMode::Normal;
                 self.command_buffer.clear();
                 let parsed = parse_ex_command(&cmd_str);
                 self.execute(parsed, screen_area)
             }
+            EditorCommand::CommandHistoryUp => {
+                if !self.command_history.is_empty() && self.command_history_idx > 0 {
+                    self.command_history_idx -= 1;
+                    self.command_buffer = self.command_history[self.command_history_idx].clone();
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::CommandHistoryDown => {
+                if self.command_history_idx + 1 < self.command_history.len() {
+                    self.command_history_idx += 1;
+                    self.command_buffer = self.command_history[self.command_history_idx].clone();
+                } else {
+                    self.command_history_idx = self.command_history.len();
+                    self.command_buffer.clear();
+                }
+                Ok(ExecOutcome::Continue)
+            }
             EditorCommand::CommandCancel => {
                 self.command_buffer.clear();
+                self.command_history_idx = self.command_history.len();
                 self.mode = EditorMode::Normal;
                 Ok(ExecOutcome::Continue)
             }
@@ -648,6 +851,30 @@ impl EditorState {
                 };
                 let count = self.focused_buf_mut().replace_all(&effective_pattern, &replacement);
                 self.status_message = Some(format!("{} replacements made", count));
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::SearchWordForward => {
+                if let Some(word) = self.focused_buf().word_at_cursor() {
+                    let pattern = format!(r"\b{}\b", regex::escape(&word));
+                    self.search.pattern = Some(pattern.clone());
+                    let cursor = self.focused_buf().cursor();
+                    if let Some(pos) = self.focused_buf().search_forward(&pattern, cursor) {
+                        self.focused_buf_mut().set_cursor_pos(pos);
+                    }
+                    self.status_message = Some(format!("/{}", pattern));
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::SearchWordBackward => {
+                if let Some(word) = self.focused_buf().word_at_cursor() {
+                    let pattern = format!(r"\b{}\b", regex::escape(&word));
+                    self.search.pattern = Some(pattern.clone());
+                    let cursor = self.focused_buf().cursor();
+                    if let Some(pos) = self.focused_buf().search_backward(&pattern, cursor) {
+                        self.focused_buf_mut().set_cursor_pos(pos);
+                    }
+                    self.status_message = Some(format!("?{}", pattern));
+                }
                 Ok(ExecOutcome::Continue)
             }
             _ => Ok(ExecOutcome::Continue),

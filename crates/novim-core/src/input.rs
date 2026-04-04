@@ -263,6 +263,89 @@ pub enum EditorCommand {
     SourceFile(String),
     /// A plugin-registered command (name, args).
     PluginCommand(String, String),
+
+    // Character find motions
+    /// f/F — (char, forward). forward=true for f, false for F
+    FindChar(char, bool),
+    /// t/T — (char, forward). Like FindChar but stops one before
+    TillChar(char, bool),
+    /// ; — repeat last f/t/F/T
+    RepeatFindChar,
+    /// , — repeat in opposite direction
+    RepeatFindCharReverse,
+
+    // Single-char operations
+    /// r + char — replace char at cursor
+    ReplaceChar(char),
+    /// x — delete char under cursor
+    DeleteCharForward,
+
+    // Line operations
+    /// o — new line below, enter insert
+    OpenLineBelow,
+    /// O — new line above, enter insert
+    OpenLineAbove,
+    /// A — move to end of line, enter insert
+    AppendEndOfLine,
+    /// I — move to first non-blank, enter insert
+    InsertStartOfLine,
+    /// C — delete to end of line, enter insert
+    ChangeToEnd,
+    /// D — delete to end of line
+    DeleteToEnd,
+    /// S — delete line content, enter insert
+    SubstituteLine,
+    /// J — join N lines
+    JoinLines(usize),
+
+    // Indentation
+    /// >> — indent N lines
+    Indent(usize),
+    /// << — dedent N lines
+    Dedent(usize),
+
+    // Case
+    /// ~ — toggle case at cursor
+    ToggleCase,
+
+    // Search
+    /// * — search word under cursor forward
+    SearchWordForward,
+    /// # — search word under cursor backward
+    SearchWordBackward,
+
+    // Navigation
+    /// % — jump to matching bracket
+    MatchBracket,
+
+    // Pane resize / zoom
+    /// Ctrl+W + — grow pane height
+    ResizePaneGrow,
+    /// Ctrl+W - — shrink pane height
+    ResizePaneShrink,
+    /// Ctrl+W > — grow pane width
+    ResizePaneWider,
+    /// Ctrl+W < — shrink pane width
+    ResizePaneNarrower,
+    /// Ctrl+W z — toggle zoom on focused pane
+    ZoomPane,
+
+    // Command history
+    /// Up arrow in command mode — recall previous command
+    CommandHistoryUp,
+    /// Down arrow in command mode — recall next command
+    CommandHistoryDown,
+
+    // Shell execution
+    /// :! — run a shell command
+    ShellCommand(String),
+
+    // URL / file under cursor
+    /// gx — open URL under cursor
+    OpenUrlUnderCursor,
+    /// gf — open file under cursor
+    OpenFileUnderCursor,
+
     Noop,
 }
 
@@ -290,6 +373,14 @@ pub enum InputState {
     WaitingMarkJump(bool),
     /// Waiting for register name after '"'
     WaitingRegister,
+    /// Waiting for target character after f/F/t/T
+    /// (forward, inclusive) — f=(true,true), F=(false,true), t=(true,false), T=(false,false)
+    WaitingFindChar(bool, bool),
+    /// Waiting for replacement character after r
+    WaitingReplaceChar,
+    /// Waiting for second > or < (for >> or <<)
+    /// true = indent (>), false = dedent (<)
+    WaitingIndent(bool),
 }
 
 /// Pending operator (d = delete, c = change, y = yank)
@@ -362,6 +453,8 @@ pub fn key_to_command(
             KeyCode::Char('d') => (EditorCommand::GotoDefinition, InputState::Ready),
             KeyCode::Char('t') => (EditorCommand::NextTab, InputState::Ready),
             KeyCode::Char('T') => (EditorCommand::PrevTab, InputState::Ready),
+            KeyCode::Char('x') => (EditorCommand::OpenUrlUnderCursor, InputState::Ready),
+            KeyCode::Char('f') => (EditorCommand::OpenFileUnderCursor, InputState::Ready),
             _ => (EditorCommand::Noop, InputState::Ready),
         };
     }
@@ -394,6 +487,40 @@ pub fn key_to_command(
             KeyCode::Char(c) if c.is_ascii_lowercase() || c == '"' || c == '+' || c.is_ascii_digit() => {
                 (EditorCommand::SelectRegister(c), InputState::Ready)
             }
+            _ => (EditorCommand::Noop, InputState::Ready),
+        };
+    }
+
+    // Handle WaitingFindChar state
+    if let InputState::WaitingFindChar(forward, inclusive) = input_state {
+        return match key.code {
+            KeyCode::Char(c) => {
+                if inclusive {
+                    (EditorCommand::FindChar(c, forward), InputState::Ready)
+                } else {
+                    (EditorCommand::TillChar(c, forward), InputState::Ready)
+                }
+            }
+            KeyCode::Esc => (EditorCommand::Noop, InputState::Ready),
+            _ => (EditorCommand::Noop, InputState::Ready),
+        };
+    }
+
+    // Handle WaitingReplaceChar state
+    if input_state == InputState::WaitingReplaceChar {
+        return match key.code {
+            KeyCode::Char(c) => (EditorCommand::ReplaceChar(c), InputState::Ready),
+            KeyCode::Esc => (EditorCommand::Noop, InputState::Ready),
+            _ => (EditorCommand::Noop, InputState::Ready),
+        };
+    }
+
+    // Handle WaitingIndent state (>> or <<)
+    if let InputState::WaitingIndent(is_indent) = input_state {
+        return match key.code {
+            KeyCode::Char('>') if is_indent => (EditorCommand::Indent(1), InputState::Ready),
+            KeyCode::Char('<') if !is_indent => (EditorCommand::Dedent(1), InputState::Ready),
+            KeyCode::Esc => (EditorCommand::Noop, InputState::Ready),
             _ => (EditorCommand::Noop, InputState::Ready),
         };
     }
@@ -537,6 +664,12 @@ fn pane_command(key: KeyEvent) -> EditorCommand {
         KeyCode::Char('9') => EditorCommand::JumpToTab(8),
         KeyCode::Char('?') => EditorCommand::ToggleHelp,
         KeyCode::Char(':') => EditorCommand::SwitchMode(EditorMode::Command),
+        // Pane resize / zoom
+        KeyCode::Char('+') | KeyCode::Char('=') => EditorCommand::ResizePaneGrow,
+        KeyCode::Char('-') => EditorCommand::ResizePaneShrink,
+        KeyCode::Char('>') => EditorCommand::ResizePaneWider,
+        KeyCode::Char('<') => EditorCommand::ResizePaneNarrower,
+        KeyCode::Char('z') => EditorCommand::ZoomPane,
         _ => EditorCommand::Noop,
     }
 }
@@ -636,6 +769,42 @@ fn normal_mode_command(key: KeyEvent) -> (EditorCommand, InputState) {
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             (EditorCommand::Save, InputState::Ready)
         }
+        // Character find motions
+        KeyCode::Char('f') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            (EditorCommand::Noop, InputState::WaitingFindChar(true, true))
+        }
+        KeyCode::Char('F') => (EditorCommand::Noop, InputState::WaitingFindChar(false, true)),
+        KeyCode::Char('t') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            (EditorCommand::Noop, InputState::WaitingFindChar(true, false))
+        }
+        KeyCode::Char('T') => (EditorCommand::Noop, InputState::WaitingFindChar(false, false)),
+        KeyCode::Char(';') => (EditorCommand::RepeatFindChar, InputState::Ready),
+        KeyCode::Char(',') => (EditorCommand::RepeatFindCharReverse, InputState::Ready),
+        // Replace char
+        KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            (EditorCommand::Noop, InputState::WaitingReplaceChar)
+        }
+        // Single-char operations
+        KeyCode::Char('x') => (EditorCommand::DeleteCharForward, InputState::Ready),
+        // Line operations
+        KeyCode::Char('o') => (EditorCommand::OpenLineBelow, InputState::Ready),
+        KeyCode::Char('O') => (EditorCommand::OpenLineAbove, InputState::Ready),
+        KeyCode::Char('A') => (EditorCommand::AppendEndOfLine, InputState::Ready),
+        KeyCode::Char('I') => (EditorCommand::InsertStartOfLine, InputState::Ready),
+        KeyCode::Char('C') => (EditorCommand::ChangeToEnd, InputState::Ready),
+        KeyCode::Char('D') => (EditorCommand::DeleteToEnd, InputState::Ready),
+        KeyCode::Char('S') => (EditorCommand::SubstituteLine, InputState::Ready),
+        KeyCode::Char('J') => (EditorCommand::JoinLines(1), InputState::Ready),
+        // Case toggle
+        KeyCode::Char('~') => (EditorCommand::ToggleCase, InputState::Ready),
+        // Indentation
+        KeyCode::Char('>') => (EditorCommand::Noop, InputState::WaitingIndent(true)),
+        KeyCode::Char('<') => (EditorCommand::Noop, InputState::WaitingIndent(false)),
+        // Search word under cursor
+        KeyCode::Char('*') => (EditorCommand::SearchWordForward, InputState::Ready),
+        KeyCode::Char('#') => (EditorCommand::SearchWordBackward, InputState::Ready),
+        // Match bracket
+        KeyCode::Char('%') => (EditorCommand::MatchBracket, InputState::Ready),
         _ => (EditorCommand::Noop, InputState::Ready),
     }
 }
@@ -757,6 +926,8 @@ fn command_mode_command(key: KeyEvent) -> EditorCommand {
         KeyCode::Esc => EditorCommand::CommandCancel,
         KeyCode::Enter => EditorCommand::CommandExecute,
         KeyCode::Backspace => EditorCommand::CommandBackspace,
+        KeyCode::Up => EditorCommand::CommandHistoryUp,
+        KeyCode::Down => EditorCommand::CommandHistoryDown,
         KeyCode::Char(c) => EditorCommand::CommandInput(c),
         _ => EditorCommand::Noop,
     }
@@ -765,6 +936,12 @@ fn command_mode_command(key: KeyEvent) -> EditorCommand {
 /// Parse and convert an ex-command string into an EditorCommand.
 pub fn parse_ex_command(input: &str) -> EditorCommand {
     let input = input.trim();
+
+    // :! shell command
+    if let Some(cmd) = input.strip_prefix('!') {
+        return EditorCommand::ShellCommand(cmd.trim().to_string());
+    }
+
     let (cmd, args) = match input.split_once(' ') {
         Some((c, a)) => (c, a.trim()),
         None => (input, ""),
