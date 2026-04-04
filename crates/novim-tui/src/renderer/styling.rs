@@ -8,6 +8,14 @@ use ratatui::{
     text::{Line, Span},
 };
 
+/// Convert a character column index to a byte offset in a string.
+fn char_col_to_byte(s: &str, col: usize) -> usize {
+    s.char_indices()
+        .nth(col)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(s.len())
+}
+
 /// Snap a byte offset to the nearest char boundary (rounding down).
 pub(super) fn snap_to_char_boundary(s: &str, byte_idx: usize) -> usize {
     let idx = byte_idx.min(s.len());
@@ -106,34 +114,39 @@ pub(super) fn styled_line_with_selection(
     }
 
     let line_len = content.len();
-    let sel_start_col = if line_num == start.line { start.column } else { 0 };
-    let sel_end_col = if line_num == end.line {
-        (end.column + 1).min(line_len)
+    // Convert char columns to byte offsets safely
+    let sel_start_byte = if line_num == start.line {
+        char_col_to_byte(content, start.column)
+    } else {
+        0
+    };
+    let sel_end_byte = if line_num == end.line {
+        char_col_to_byte(content, end.column + 1).min(line_len)
     } else {
         line_len
     };
 
-    let sel_start_col = sel_start_col.min(line_len);
-    let sel_end_col = sel_end_col.min(line_len);
+    let sel_start_byte = sel_start_byte.min(line_len);
+    let sel_end_byte = sel_end_byte.min(line_len);
 
     let mut spans = Vec::new();
 
     // Before selection
-    if sel_start_col > 0 {
-        spans.push(Span::raw(content[..sel_start_col].to_string()));
+    if sel_start_byte > 0 {
+        spans.push(Span::raw(content[..sel_start_byte].to_string()));
     }
 
     // Selected portion
-    if sel_start_col < sel_end_col {
+    if sel_start_byte < sel_end_byte {
         spans.push(Span::styled(
-            content[sel_start_col..sel_end_col].to_string(),
+            content[sel_start_byte..sel_end_byte].to_string(),
             sel_style,
         ));
     }
 
     // After selection
-    if sel_end_col < line_len {
-        spans.push(Span::raw(content[sel_end_col..].to_string()));
+    if sel_end_byte < line_len {
+        spans.push(Span::raw(content[sel_end_byte..].to_string()));
     }
 
     if spans.is_empty() {
@@ -152,7 +165,11 @@ pub(super) fn apply_diagnostic_highlights<'a>(
 ) -> Vec<Span<'static>> {
     let mut ranges: Vec<(usize, usize, novim_core::lsp::DiagnosticSeverity)> = diags
         .iter()
-        .map(|d| (d.col_start.min(content.len()), d.col_end.min(content.len()), d.severity))
+        .map(|d| {
+            let start = char_col_to_byte(content, d.col_start).min(content.len());
+            let end = char_col_to_byte(content, d.col_end).min(content.len());
+            (start, end, d.severity)
+        })
         .filter(|(s, e, _)| s < e)
         .collect();
     ranges.sort_by_key(|(s, _, _)| *s);

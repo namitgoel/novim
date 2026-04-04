@@ -90,12 +90,14 @@ pub(super) fn position_cursor(
         border_off + 5
     };
 
+    let frame_size = f.area();
     if let (Some(row), Some(col)) = (cursor_screen_row, cursor_screen_col) {
         if row < available_height {
-            f.set_cursor_position((
-                area.x + col_offset + col as u16,
-                area.y + border_off + row as u16,
-            ));
+            let cx = area.x + col_offset + col as u16;
+            let cy = area.y + border_off + row as u16;
+            if cx < frame_size.width && cy < frame_size.height {
+                f.set_cursor_position((cx, cy));
+            }
         }
     } else {
         let cursor_line_on_screen = if is_terminal {
@@ -110,10 +112,11 @@ pub(super) fn position_cursor(
                 let raw = content.get_line(cursor.line).unwrap_or_default();
                 display_col(&raw, cursor.column, tab_width)
             };
-            f.set_cursor_position((
-                area.x + col_offset + visual_col as u16,
-                area.y + border_off + cursor_line_on_screen as u16,
-            ));
+            let cx = area.x + col_offset + visual_col as u16;
+            let cy = area.y + border_off + cursor_line_on_screen as u16;
+            if cx < frame_size.width && cy < frame_size.height {
+                f.set_cursor_position((cx, cy));
+            }
         }
     }
 }
@@ -274,13 +277,14 @@ pub(super) fn render_single_pane(
             }
 
             // With word wrap, split the line into multiple screen rows
-            let wrap_segments = if word_wrap && text_width > 0 && line_content.len() > text_width {
+            let char_count = line_content.chars().count();
+            let wrap_segments = if word_wrap && text_width > 0 && char_count > text_width {
                 wrap_line(&line_content, text_width)
             } else {
-                vec![line_content.as_str()]
+                vec![line_content.clone()]
             };
 
-            for (wrap_idx, _segment) in wrap_segments.iter().enumerate() {
+            for (wrap_idx, segment) in wrap_segments.iter().enumerate() {
                 if screen_row >= available_height { break; }
 
                 // Track cursor position on wrapped lines
@@ -315,9 +319,7 @@ pub(super) fn render_single_pane(
                     if !line_label.is_empty() {
                         spans.push(Span::styled("     ".to_string(), num_style));
                     }
-                    let seg_start = wrap_idx * text_width;
-                    let seg_end = ((wrap_idx + 1) * text_width).min(line_content.len());
-                    spans.push(Span::raw(line_content[seg_start..seg_end].to_string()));
+                    spans.push(Span::raw(segment.clone()));
                     lines.push(Line::from(spans));
                 }
                 screen_row += 1;

@@ -13,27 +13,29 @@ pub(super) const TAB_COLORS: &[u8] = &[
     139, // mauve
 ];
 
-/// How many screen rows a line occupies when wrapped.
+/// How many screen rows a line occupies when wrapped (char-aware).
 pub(super) fn wrapped_row_count(line: &str, width: usize) -> usize {
     if width == 0 || line.is_empty() { return 1; }
-    let len = line.len();
-    len.div_ceil(width).max(1)
+    let char_count = line.chars().count();
+    char_count.div_ceil(width).max(1)
 }
 
-/// Split a line into wrapped segments of at most `width` characters.
-pub(super) fn wrap_line(line: &str, width: usize) -> Vec<&str> {
-    if width == 0 || line.len() <= width {
-        return vec![line];
+/// Split a line into wrapped segments of at most `width` characters (char-aware).
+pub(super) fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    let char_count = line.chars().count();
+    if width == 0 || char_count <= width {
+        return vec![line.to_string()];
     }
+    let chars: Vec<char> = line.chars().collect();
     let mut segments = Vec::new();
     let mut start = 0;
-    while start < line.len() {
-        let end = (start + width).min(line.len());
-        segments.push(&line[start..end]);
+    while start < chars.len() {
+        let end = (start + width).min(chars.len());
+        segments.push(chars[start..end].iter().collect::<String>());
         start = end;
     }
     if segments.is_empty() {
-        segments.push("");
+        segments.push(String::new());
     }
     segments
 }

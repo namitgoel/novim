@@ -30,20 +30,43 @@ pub(super) fn render_help_popup(f: &mut ratatui::Frame, area: Rect, scroll: usiz
         Line::from(""),
         Line::from(Span::styled("  Navigation", h)),
         help_line("  h/j/k/l", "Move cursor", k, d),
-        help_line("  Ctrl+U / Ctrl+D", "Scroll up/down", k, d),
+        help_line("  w / b / e", "Word forward / back / end", k, d),
+        help_line("  0 / $", "Line start / end", k, d),
+        help_line("  gg / G", "File start / end", k, d),
+        help_line("  f/F + char", "Find char forward / back", k, d),
+        help_line("  t/T + char", "Till char forward / back", k, d),
+        help_line("  ; / ,", "Repeat / reverse find", k, d),
+        help_line("  { / }", "Paragraph back / forward", k, d),
+        help_line("  ( / )", "Sentence back / forward", k, d),
+        help_line("  %", "Matching bracket", k, d),
+        help_line("  * / #", "Search word fwd / back", k, d),
+        help_line("  Ctrl+U / Ctrl+D", "Scroll half page", k, d),
+        help_line("  Ctrl+B / PgUp/Dn", "Scroll full page", k, d),
+        help_line("  zz / zt / zb", "Center / top / bottom", k, d),
         help_line("  5j / 3k", "Move N lines", k, d),
         help_line("  /pattern", "Search (regex)", k, d),
         help_line("  n / N", "Next / prev match", k, d),
-        help_line("  Esc", "Clear search / Normal mode", k, d),
+        help_line("  Esc", "Normal mode", k, d),
         Line::from(""),
         Line::from(Span::styled("  Editing", h)),
-        help_line("  i", "Insert mode", k, d),
-        help_line("  v", "Visual mode (select)", k, d),
+        help_line("  i / a", "Insert / Append", k, d),
+        help_line("  I / A", "Insert line start / end", k, d),
+        help_line("  o / O", "Open line below / above", k, d),
+        help_line("  v / Ctrl+V", "Visual / Block select", k, d),
+        help_line("  gv", "Reselect last visual", k, d),
+        help_line("  R", "Replace mode (overtype)", k, d),
+        help_line("  r + char", "Replace single char", k, d),
+        help_line("  x", "Delete char forward", k, d),
+        help_line("  ~", "Toggle case", k, d),
         help_line("  u / Ctrl+R", "Undo / Redo", k, d),
-        help_line("  p", "Paste", k, d),
+        help_line("  p / P", "Paste after / before", k, d),
         help_line("  dd / 3dd", "Delete line(s)", k, d),
-        help_line("  cc", "Change line", k, d),
-        help_line("  dl / dh", "Delete char right/left", k, d),
+        help_line("  cc / C", "Change line / to end", k, d),
+        help_line("  D / S", "Delete to end / Subst line", k, d),
+        help_line("  J", "Join lines", k, d),
+        help_line("  >> / <<", "Indent / Dedent", k, d),
+        help_line("  \"a + y/d/p", "Use register a", k, d),
+        help_line("  .", "Repeat last edit", k, d),
         help_line("  :", "Command mode", k, d),
         Line::from(""),
         Line::from(Span::styled("  File", h)),
@@ -56,14 +79,16 @@ pub(super) fn render_help_popup(f: &mut ratatui::Frame, area: Rect, scroll: usiz
         help_line("  :bn / :bp", "Next / prev buffer", k, d),
         Line::from(""),
         Line::from(Span::styled("  Panes (Ctrl+W prefix)", h)),
-        help_line("  Ctrl+W v", "Vertical split", k, d),
-        help_line("  Ctrl+W s", "Horizontal split", k, d),
+        help_line("  Ctrl+W v / s", "Split vertical / horiz", k, d),
         help_line("  Ctrl+W h/j/k/l", "Move focus", k, d),
         help_line("  Ctrl+W q", "Close pane", k, d),
         help_line("  Ctrl+W t", "Open terminal", k, d),
+        help_line("  Ctrl+W x", "Swap panes", k, d),
+        help_line("  Ctrl+W z", "Toggle zoom pane", k, d),
+        help_line("  Ctrl+W +/-/>/<", "Resize pane", k, d),
+        help_line("  Ctrl+W [", "Terminal copy mode", k, d),
         help_line("  Ctrl+W f", "File finder", k, d),
         help_line("  Ctrl+W e", "Focus explorer", k, d),
-        help_line("  Ctrl+W :", "Command mode (terminal)", k, d),
         Line::from(""),
         Line::from(Span::styled("  Workspaces", h)),
         help_line("  :tabnew <path>", "New workspace", k, d),
@@ -96,12 +121,20 @@ pub(super) fn render_help_popup(f: &mut ratatui::Frame, area: Rect, scroll: usiz
         help_line("  @@", "Replay last macro", k, d),
         Line::from(""),
         Line::from(Span::styled("  Other", h)),
+        help_line("  gd", "Go to definition (LSP)", k, d),
+        help_line("  K", "Hover info (LSP)", k, d),
+        help_line("  gx", "Open URL under cursor", k, d),
+        help_line("  gf", "Open file under cursor", k, d),
+        help_line("  Ctrl+O / Ctrl+I", "Jump back / forward", k, d),
+        help_line("  ma / 'a / `a", "Set / jump to mark", k, d),
+        help_line("  :marks", "List all marks", k, d),
+        help_line("  :registers", "List all registers", k, d),
+        help_line("  :!cmd", "Run shell command", k, d),
         help_line("  :%s/old/new", "Replace all (regex)", k, d),
         help_line("  :mksession", "Save session", k, d),
         help_line("  :set rnu/nonu", "Line number mode", k, d),
         help_line("  :set wrap/nowrap", "Toggle word wrap", k, d),
         help_line("  :set et/noet", "Expand tab on/off", k, d),
-        help_line("  :set ai/noai", "Auto-indent on/off", k, d),
         help_line("  :set ts=N", "Set tab width", k, d),
         help_line("  Ctrl+L", "Redraw screen", k, d),
         Line::from(""),
@@ -413,11 +446,8 @@ pub(super) fn render_finder_preview(f: &mut ratatui::Frame, area: Rect, state: &
         for (i, line) in state.finder.preview_lines.iter().enumerate().take(available_height) {
             let num = format!("{:>3} ", i + 1);
             let max_width = area.width as usize - 7;
-            let content = if line.len() > max_width {
-                &line[..max_width]
-            } else {
-                line.as_str()
-            };
+            let content: String = line.chars().take(max_width).collect();
+            let content = content.as_str();
 
             // Apply syntax highlighting if available
             let text_spans = if let Some(hl_spans) = state.finder.preview_highlights.get(i) {
@@ -462,15 +492,22 @@ pub(super) fn render_hover_popup(f: &mut ratatui::Frame, area: Rect, text: &str,
     let popup_width = (max_line_width as u16 + 4).min(area.width.saturating_sub(10)).max(20);
     let popup_height = (lines.len() as u16 + 2).min(15).min(area.height.saturating_sub(4));
 
-    // Position above cursor
-    let cursor = state.tabs[state.active_tab].panes.focused_pane().content.as_buffer_like().cursor();
+    // Position above cursor (use screen-relative coordinates)
+    let pane = state.tabs[state.active_tab].panes.focused_pane();
+    let cursor = pane.content.as_buffer_like().cursor();
+    let screen_line = cursor.line.saturating_sub(pane.viewport_offset) as u16;
     let x = (6 + cursor.column as u16).min(area.width.saturating_sub(popup_width));
-    let y = if cursor.line as u16 > popup_height + 2 {
-        cursor.line as u16 - popup_height
+    let y = if screen_line > popup_height + 2 {
+        area.y + screen_line - popup_height
     } else {
-        (cursor.line as u16 + 2).min(area.height.saturating_sub(popup_height))
+        (area.y + screen_line + 2).min(area.y + area.height.saturating_sub(popup_height))
     };
-    let popup_area = Rect::new(x, y, popup_width, popup_height);
+    let popup_area = Rect::new(
+        x.min(area.x + area.width.saturating_sub(popup_width)),
+        y.min(area.y + area.height.saturating_sub(popup_height)),
+        popup_width,
+        popup_height,
+    );
 
     f.render_widget(Clear, popup_area);
 

@@ -56,10 +56,11 @@ impl EditorState {
                 self.last_find_char = Some((c, forward, true));
                 let cursor = self.focused_buf().cursor();
                 let line = self.focused_buf().get_line(cursor.line).unwrap_or_default();
+                let chars: Vec<char> = line.chars().collect();
                 let new_col = if forward {
-                    line[cursor.column + 1..].find(c).map(|i| cursor.column + 1 + i)
+                    chars.iter().enumerate().skip(cursor.column + 1).find(|(_, &ch)| ch == c).map(|(i, _)| i)
                 } else {
-                    line[..cursor.column].rfind(c)
+                    chars.iter().enumerate().take(cursor.column).rev().find(|(_, &ch)| ch == c).map(|(i, _)| i)
                 };
                 if let Some(col) = new_col {
                     self.focused_buf_mut().set_cursor_pos(novim_types::Position::new(cursor.line, col));
@@ -70,10 +71,11 @@ impl EditorState {
                 self.last_find_char = Some((c, forward, false));
                 let cursor = self.focused_buf().cursor();
                 let line = self.focused_buf().get_line(cursor.line).unwrap_or_default();
+                let chars: Vec<char> = line.chars().collect();
                 let new_col = if forward {
-                    line[cursor.column + 1..].find(c).map(|i| cursor.column + i)
+                    chars.iter().enumerate().skip(cursor.column + 1).find(|(_, &ch)| ch == c).map(|(i, _)| i.saturating_sub(1).max(cursor.column + 1))
                 } else {
-                    line[..cursor.column].rfind(c).map(|i| i + 1)
+                    chars.iter().enumerate().take(cursor.column).rev().find(|(_, &ch)| ch == c).map(|(i, _)| i + 1)
                 };
                 if let Some(col) = new_col {
                     self.focused_buf_mut().set_cursor_pos(novim_types::Position::new(cursor.line, col));

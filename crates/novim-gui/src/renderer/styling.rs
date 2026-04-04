@@ -98,9 +98,10 @@ pub(super) fn highlight_with_selection(
         vec![RichSpan { text: expanded.to_string(), color: FG }]
     };
 
-    // Determine selection range on this line
+    // Determine selection range on this line (in char columns)
+    let char_count = expanded.chars().count();
     let line_start = if line_num == sel_start.line { sel_start.column } else if line_num > sel_start.line { 0 } else { return base; };
-    let line_end = if line_num == sel_end.line { sel_end.column + 1 } else if line_num < sel_end.line { expanded.len() } else { return base; };
+    let line_end = if line_num == sel_end.line { sel_end.column + 1 } else if line_num < sel_end.line { char_count } else { return base; };
 
     if line_num < sel_start.line || line_num > sel_end.line {
         return base;

@@ -448,7 +448,18 @@ impl Drop for TerminalManager {
     }
 }
 
+fn setup_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Restore terminal before printing panic
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+        default_hook(info);
+    }));
+}
+
 fn init_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
+    setup_panic_hook();
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
