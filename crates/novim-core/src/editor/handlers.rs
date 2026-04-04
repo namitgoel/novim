@@ -13,7 +13,7 @@ use crate::pane::{PaneContent, SplitDirection};
 use crate::session;
 use novim_types::{EditorMode, Selection};
 
-use super::{EditorState, ExecOutcome, LineNumberMode, Workspace, resolve_path};
+use super::{ConfirmReplaceState, EditorState, ExecOutcome, LineNumberMode, Workspace, resolve_path};
 
 impl EditorState {
     pub(super) fn execute_navigation(&mut self, cmd: EditorCommand) -> Result<ExecOutcome, NovimError> {
@@ -108,6 +108,16 @@ impl EditorState {
                 if let Some(pos) = self.focused_buf().find_matching_bracket() {
                     self.focused_buf_mut().set_cursor_pos(pos);
                 }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::DisplayLineDown => {
+                // TODO: when word wrap is on, move by display line instead of buffer line
+                self.focused_buf_mut().move_cursor(novim_types::Direction::Down);
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::DisplayLineUp => {
+                // TODO: when word wrap is on, move by display line instead of buffer line
+                self.focused_buf_mut().move_cursor(novim_types::Direction::Up);
                 Ok(ExecOutcome::Continue)
             }
             _ => Ok(ExecOutcome::Continue),
@@ -927,6 +937,109 @@ impl EditorState {
                     }
                     self.status_message = Some(format!("?{}", pattern));
                 }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ReplaceConfirm(pattern, replacement, case_insensitive) => {
+                let effective = if case_insensitive {
+                    format!("(?i){}", pattern)
+                } else {
+                    pattern.clone()
+                };
+                self.confirm_replace = ConfirmReplaceState {
+                    active: true,
+                    pattern: effective.clone(),
+                    literal_pattern: pattern,
+                    replacement,
+                    current_match: None,
+                    replaced_count: 0,
+                };
+                // Find first match
+                let cursor = self.focused_buf().cursor();
+                if let Some(pos) = self.focused_buf().search_forward(&effective, cursor) {
+                    self.confirm_replace.current_match = Some(pos);
+                    self.focused_buf_mut().set_cursor_pos(pos);
+                    self.search.pattern = Some(effective);
+                    self.status_message = Some("Replace? (y/n/a/q)".to_string());
+                } else {
+                    self.confirm_replace.active = false;
+                    self.status_message = Some("No matches found".to_string());
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ReplaceConfirmYes => {
+                if !self.confirm_replace.active {
+                    return Ok(ExecOutcome::Continue);
+                }
+                if let Some(pos) = self.confirm_replace.current_match {
+                    self.focused_buf_mut().set_cursor_pos(pos);
+                    // Delete the matched text (literal pattern length chars forward)
+                    let match_len = self.confirm_replace.literal_pattern.chars().count();
+                    for _ in 0..match_len {
+                        self.focused_buf_mut().delete_char_forward();
+                    }
+                    // Insert the replacement text
+                    let replacement = self.confirm_replace.replacement.clone();
+                    for c in replacement.chars() {
+                        self.focused_buf_mut().insert_char(c);
+                    }
+                    self.focused_buf_mut().break_undo_group();
+                    self.confirm_replace.replaced_count += 1;
+                }
+                // Find next match
+                let pattern = self.confirm_replace.pattern.clone();
+                let cursor = self.focused_buf().cursor();
+                if let Some(next) = self.focused_buf().search_forward(&pattern, cursor) {
+                    self.confirm_replace.current_match = Some(next);
+                    self.focused_buf_mut().set_cursor_pos(next);
+                    self.status_message = Some(format!(
+                        "Replace? (y/n/a/q) [{} replaced]",
+                        self.confirm_replace.replaced_count
+                    ));
+                } else {
+                    let count = self.confirm_replace.replaced_count;
+                    self.confirm_replace = ConfirmReplaceState::default();
+                    self.status_message = Some(format!("{} replacement(s) made", count));
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ReplaceConfirmNo => {
+                if !self.confirm_replace.active {
+                    return Ok(ExecOutcome::Continue);
+                }
+                // Skip this match, find next
+                let pattern = self.confirm_replace.pattern.clone();
+                let cursor = self.focused_buf().cursor();
+                if let Some(next) = self.focused_buf().search_forward(&pattern, cursor) {
+                    self.confirm_replace.current_match = Some(next);
+                    self.focused_buf_mut().set_cursor_pos(next);
+                    self.status_message = Some(format!(
+                        "Replace? (y/n/a/q) [{} replaced]",
+                        self.confirm_replace.replaced_count
+                    ));
+                } else {
+                    let count = self.confirm_replace.replaced_count;
+                    self.confirm_replace = ConfirmReplaceState::default();
+                    self.status_message = Some(format!("{} replacement(s) made", count));
+                }
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ReplaceConfirmAll => {
+                if !self.confirm_replace.active {
+                    return Ok(ExecOutcome::Continue);
+                }
+                // Replace all remaining matches using replace_all
+                let pattern = self.confirm_replace.pattern.clone();
+                let replacement = self.confirm_replace.replacement.clone();
+                let count = self.focused_buf_mut().replace_all(&pattern, &replacement);
+                let total = self.confirm_replace.replaced_count + count;
+                self.confirm_replace = ConfirmReplaceState::default();
+                self.status_message = Some(format!("{} replacement(s) made", total));
+                Ok(ExecOutcome::Continue)
+            }
+            EditorCommand::ReplaceConfirmQuit => {
+                let count = self.confirm_replace.replaced_count;
+                self.confirm_replace = ConfirmReplaceState::default();
+                self.status_message = Some(format!("Stopped. {} replacement(s) made", count));
                 Ok(ExecOutcome::Continue)
             }
             _ => Ok(ExecOutcome::Continue),

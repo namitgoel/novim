@@ -175,6 +175,22 @@ impl TerminalManager {
                             }
                         }
 
+                        // Confirm replace mode: intercept y/n/a/q
+                        if self.state.confirm_replace.active {
+                            let cmd = match key.code {
+                                KeyCode::Char('y') | KeyCode::Char('Y') => EditorCommand::ReplaceConfirmYes,
+                                KeyCode::Char('n') | KeyCode::Char('N') => EditorCommand::ReplaceConfirmNo,
+                                KeyCode::Char('a') | KeyCode::Char('A') => EditorCommand::ReplaceConfirmAll,
+                                KeyCode::Char('q') | KeyCode::Esc => EditorCommand::ReplaceConfirmQuit,
+                                _ => EditorCommand::Noop,
+                            };
+                            if !matches!(cmd, EditorCommand::Noop) {
+                                let screen_area = self.screen_area()?;
+                                self.exec(cmd, screen_area);
+                            }
+                            continue;
+                        }
+
                         // Help popup: scroll with arrows
                         if self.state.show_help {
                             match key.code {

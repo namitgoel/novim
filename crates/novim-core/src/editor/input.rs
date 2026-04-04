@@ -295,6 +295,8 @@ impl EditorState {
             | EditorCommand::ChangeMotion(..)
             | EditorCommand::ChangeLines(_)
             | EditorCommand::ReplaceAll(..)
+            | EditorCommand::ReplaceConfirmYes
+            | EditorCommand::ReplaceConfirmAll
             | EditorCommand::Undo
             | EditorCommand::Redo
             | EditorCommand::DeleteSelection

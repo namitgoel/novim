@@ -403,6 +403,21 @@ fn handle_key(
         }
     }
 
+    // ── Confirm replace mode ──
+    if editor.confirm_replace.active {
+        let cmd = match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => EditorCommand::ReplaceConfirmYes,
+            KeyCode::Char('n') | KeyCode::Char('N') => EditorCommand::ReplaceConfirmNo,
+            KeyCode::Char('a') | KeyCode::Char('A') => EditorCommand::ReplaceConfirmAll,
+            KeyCode::Char('q') | KeyCode::Esc => EditorCommand::ReplaceConfirmQuit,
+            _ => EditorCommand::Noop,
+        };
+        if !matches!(cmd, EditorCommand::Noop) {
+            return exec(editor, cmd, screen);
+        }
+        return false;
+    }
+
     // ── Help popup ──
     if editor.show_help {
         match key.code {

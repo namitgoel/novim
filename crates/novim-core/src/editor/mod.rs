@@ -82,6 +82,8 @@ pub struct EditorState {
     /// Command-line history for up/down recall.
     pub command_history: Vec<String>,
     pub command_history_idx: usize,
+    /// Interactive confirm-replace state (`:s///c`).
+    pub confirm_replace: ConfirmReplaceState,
 }
 
 impl EditorState {
@@ -160,6 +162,7 @@ impl EditorState {
             last_find_char: None,
             command_history: Vec::new(),
             command_history_idx: 0,
+            confirm_replace: ConfirmReplaceState::default(),
         }
     }
 
@@ -326,7 +329,9 @@ impl EditorState {
             | EditorCommand::TillChar(..)
             | EditorCommand::RepeatFindChar
             | EditorCommand::RepeatFindCharReverse
-            | EditorCommand::MatchBracket => self.execute_navigation(cmd),
+            | EditorCommand::MatchBracket
+            | EditorCommand::DisplayLineDown
+            | EditorCommand::DisplayLineUp => self.execute_navigation(cmd),
 
             // Folds
             EditorCommand::ToggleFold
@@ -444,6 +449,11 @@ impl EditorState {
             | EditorCommand::PrevMatch
             | EditorCommand::ClearSearch
             | EditorCommand::ReplaceAll(..)
+            | EditorCommand::ReplaceConfirm(..)
+            | EditorCommand::ReplaceConfirmYes
+            | EditorCommand::ReplaceConfirmNo
+            | EditorCommand::ReplaceConfirmAll
+            | EditorCommand::ReplaceConfirmQuit
             | EditorCommand::SearchWordForward
             | EditorCommand::SearchWordBackward => self.execute_search(cmd),
 

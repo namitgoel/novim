@@ -115,6 +115,23 @@ pub struct PluginPopup {
     pub on_select: Option<(String, String)>,
 }
 
+/// State for interactive `:s///c` confirm substitution.
+#[derive(Default)]
+pub struct ConfirmReplaceState {
+    /// Whether confirm-replace mode is active.
+    pub active: bool,
+    /// The search pattern (may include `(?i)` prefix for case-insensitive).
+    pub pattern: String,
+    /// The original literal pattern (without regex prefix), used for match length.
+    pub literal_pattern: String,
+    /// The replacement string.
+    pub replacement: String,
+    /// Current match position (cursor is here).
+    pub current_match: Option<novim_types::Position>,
+    /// Number of replacements made so far.
+    pub replaced_count: usize,
+}
+
 /// Record of an edit operation for dot repeat.
 #[derive(Debug, Clone)]
 pub struct EditRecord {

@@ -165,6 +165,16 @@ pub enum EditorCommand {
     /// Replace all: (pattern, replacement)
     /// Replace all: (pattern, replacement, case_insensitive)
     ReplaceAll(String, String, bool),
+    /// Interactive confirm substitution: (pattern, replacement, case_insensitive)
+    ReplaceConfirm(String, String, bool),
+    /// Confirm replace: accept current match
+    ReplaceConfirmYes,
+    /// Confirm replace: skip current match
+    ReplaceConfirmNo,
+    /// Confirm replace: replace all remaining
+    ReplaceConfirmAll,
+    /// Confirm replace: stop
+    ReplaceConfirmQuit,
     /// Clear search highlights
     ClearSearch,
     /// Start recording macro into a register
@@ -377,6 +387,11 @@ pub enum EditorCommand {
     /// Replace mode insert char (overwrites instead of inserting)
     ReplaceInsertChar(char),
 
+    /// gj — move down one display/screen line
+    DisplayLineDown,
+    /// gk — move up one display/screen line
+    DisplayLineUp,
+
     Noop,
 }
 
@@ -487,6 +502,8 @@ pub fn key_to_command(
             KeyCode::Char('x') => (EditorCommand::OpenUrlUnderCursor, InputState::Ready),
             KeyCode::Char('f') => (EditorCommand::OpenFileUnderCursor, InputState::Ready),
             KeyCode::Char('v') => (EditorCommand::ReselectVisual, InputState::Ready),
+            KeyCode::Char('j') => (EditorCommand::DisplayLineDown, InputState::Ready),
+            KeyCode::Char('k') => (EditorCommand::DisplayLineUp, InputState::Ready),
             _ => (EditorCommand::Noop, InputState::Ready),
         };
     }
@@ -1099,7 +1116,12 @@ pub fn parse_ex_command(input: &str) -> EditorCommand {
                 if parts.len() >= 2 {
                     let pattern = parts[0].to_string();
                     let replacement = parts.get(1).unwrap_or(&"").to_string();
-                    let case_insensitive = parts.get(2).map(|f| f.contains('i')).unwrap_or(false);
+                    let flags = parts.get(2).unwrap_or(&"");
+                    let case_insensitive = flags.contains('i');
+                    let confirm = flags.contains('c');
+                    if confirm {
+                        return EditorCommand::ReplaceConfirm(pattern, replacement, case_insensitive);
+                    }
                     return EditorCommand::ReplaceAll(pattern, replacement, case_insensitive);
                     // TODO: use range and case_insensitive when ReplaceRange is implemented
                 }

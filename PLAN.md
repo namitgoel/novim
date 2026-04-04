@@ -511,13 +511,127 @@ examples/plugins/
 
 ---
 
-## v2.0.0+ — Long-term Vision
+## v1.2.0 — Complete
+
+### Code Quality Refactoring
+- Split `execute_inner()` (819 lines) into 14 focused handler methods
+- Split `setup_api_and_run()` (580 lines) into 8 API setup methods
+- Extracted shared `text_utils` module (`expand_tabs`, `display_col` with `Cow<str>`)
+- Deduplicated LSP polling via `LspPollResult` struct
+- Deduplicated jump navigation, buffer constructors, screen area helpers
+- Removed unnecessary clones in hot paths (search patterns, syntax theme, dot repeat)
+- Added error logging for silent failures (PTY reads, LSP spawn)
+- Added input state machine safety guard
+- Replaced hardcoded tab numbers with range pattern (GUI)
+- Extracted `run_terminal()` helper in CLI
+
+### File Splitting
+- `editor.rs` (2354 lines) → `editor/` module (mod.rs, types.rs, workspace.rs, handlers.rs, input.rs)
+- TUI `renderer.rs` (1741 lines) → `renderer/` module (mod.rs, pane.rs, popups.rs, styling.rs, util.rs)
+- GUI `renderer.rs` (1755 lines) → `renderer/` module (mod.rs, theme.rs, pane.rs, popups.rs, styling.rs)
+- `lua_bridge.rs` (1614 lines) → `lua_bridge/` module (mod.rs, api.rs, dispatch.rs, tests.rs)
+
+### Bug Fixes
+- Fixed multi-byte char panics in syntax highlighting (tree-sitter byte offsets → char boundaries)
+- Fixed multi-byte char panics in search highlights, selection highlights, diagnostics, file finder preview, word wrap
+- Fixed hover popup positioning (used buffer line instead of screen-relative position)
+- Fixed `FindChar`/`TillChar` panic on empty lines (byte slicing → char iteration)
+- Fixed render-loop panics in GUI (expect → graceful error logging)
+- Added panic hook to restore terminal on crash
+
+### Vim Features Added
+- **Character find** — `f`/`F`/`t`/`T` + `;`/`,` repeat
+- **Single-char ops** — `x` (delete forward), `r` (replace), `~` (toggle case)
+- **Line operations** — `o`/`O` (open line), `J` (join), `A`/`I` (append/insert at bounds), `C`/`D`/`S` (change/delete to end, substitute)
+- **Indentation** — `>>`/`<<` with count
+- **Search** — `*`/`#` (word under cursor), `%` (matching bracket)
+- **Paste before** — `P`
+- **Replace mode** — `R` (overtype mode)
+- **Visual reselect** — `gv`
+- **Display line motion** — `gj`/`gk`
+- **Paragraph/sentence motion** — `{`/`}`/`(`/`)`
+- **Scroll** — `zz`/`zt`/`zb` (center/top/bottom), `Ctrl+B`/`PageUp`/`PageDown` (full page)
+- **Confirm substitute** — `:%s/foo/bar/c` with y/n/a/q interactive prompt
+- **Open URL/file** — `gx` (URL under cursor), `gf` (file under cursor)
+- **List commands** — `:marks`, `:registers`/`:reg`
+- **Shell execution** — `:!cmd`
+- **Command history** — Up/Down in `:` mode
+
+### tmux Features Added
+- **Pane resize** — `Ctrl+W +/-/>/<`
+- **Pane zoom** — `Ctrl+W z` (toggle full-screen pane)
+- **Pane swap** — `Ctrl+W x`
+- **Terminal copy mode** — `Ctrl+W [` with j/k scrollback navigation
+- **Scrollback buffer** — 10,000 lines stored in VecDeque
+
+### Terminal Features Added
+- **OSC 7** — Shell CWD integration (zsh/bash report working directory)
+
+### Help Popup Updated
+- Navigation section expanded: motions, find, paragraph, sentence, bracket, search, scroll
+- Editing section expanded: all new insert/change/delete commands, registers, dot repeat
+- Pane section expanded: resize, zoom, swap, copy mode
+- Commands section: gx, gf, marks, registers, shell, jump list
+
+---
+
+## v2.0.0 — Vim/tmux/WezTerm Parity
+
+### Vim — Easy (target: v2.0.0)
+
+| Feature | Keys | Notes |
+|---------|------|-------|
+| Yank to EOL | `Y` | Map to `y$` (neovim behavior) |
+| Scroll one line | `Ctrl+E`/`Ctrl+Y` | Scroll without moving cursor |
+| Screen jump | `H`/`M`/`L` | Jump to top/middle/bottom of visible screen |
+| Jump to last pos | `''` | Two single quotes → jump before last jump |
+| Change directory | `:cd`/`:lcd` | Set workspace CWD |
+| File info | `Ctrl+G` | Show filename, line count, cursor % |
+| Visual indent | `>`/`<` in visual mode | Indent/dedent selected lines |
+| Visual case | `~`/`U`/`u` in visual mode | Toggle/upper/lower case on selection |
+
+### Vim — Medium (target: v2.0.0)
+
+| Feature | Keys | Notes |
+|---------|------|-------|
+| Increment/decrement | `Ctrl+A`/`Ctrl+X` | Find number at/after cursor, +1/-1 |
+| Case with motion | `gU`/`gu` + motion | `gUw` uppercase word, `guu` lowercase line |
+| Insert file/cmd | `:read file` / `:read !cmd` | Insert output into buffer |
+| Sort lines | `:sort` / `:'<,'>sort` | Sort selected or all lines |
+| Pipe to command | `:w !cmd` | Send buffer to external command |
+| Auto-indent | `==` | Re-indent current line based on context |
+
+### Vim — Hard (target: v2.1.0+)
+
+| Feature | Notes |
+|---------|-------|
+| Tab completion in `:` mode | Complete commands, file paths, options |
+| Quickfix / location list | `:copen`, `:cnext`, `:cprev` for build errors |
+| Command window `q:` | Edit command history as a buffer |
+| Format text `gq` | Wrap/reformat text with motion |
+
+### tmux (target: v2.0.0)
+
+| Feature | Notes |
+|---------|-------|
+| Copy mode selection | `v` to start selection, `y` to yank in copy mode |
+| Status line customization | Configurable status bar segments via TOML |
+
+### WezTerm / Terminal (target: v2.0.0)
+
+| Feature | Notes |
+|---------|-------|
+| 24-bit true color | Add `CellColor::Rgb(u8, u8, u8)` + parse `38;2;R;G;B` in performer |
+| OSC 133 prompt markers | Mark prompt/command/output boundaries for smart scrolling |
+| Clickable hyperlinks | OSC 8 hyperlink support + mouse click handler |
+
+---
+
+## v2.1.0+ — Advanced Features
 
 ### Near-term
 - Plugin manifest (name, version, dependencies in `.toml`)
 - Plugin install from git URLs / package manager
-- `:substitute` confirm flag (`/c`) — interactive per-match confirm
-- Full range support in all ex-commands (`:5,10y`, `:'<,'>s/...`)
 - Floating windows (plugin-created, resizable)
 - Tree-sitter based code navigation (go to function, list symbols)
 
