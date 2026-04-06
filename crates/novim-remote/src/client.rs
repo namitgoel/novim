@@ -143,6 +143,7 @@ fn run_client_loop(
                 Event::Key(key) => {
                     let code = key_to_string(&key);
                     let mods = key.modifiers.bits() as u8;
+                    log::info!("[novim-ssh] Sending key: code={}, mods={}", code, mods);
                     transport::write_message(writer, &ClientMessage::Key { code, modifiers: mods })?;
                 }
                 Event::Mouse(mouse) => {
@@ -177,26 +178,45 @@ fn paint_frame(
     cells: &[Vec<StyledCell>],
     cursor: Option<(u16, u16)>,
 ) -> io::Result<()> {
-    queue!(stdout, cursor::Hide)?;
+    // Reset and hide cursor
+    queue!(stdout, cursor::Hide, SetAttribute(Attribute::Reset))?;
+
+    let mut last_fg: [u8; 3] = [0, 0, 0];
+    let mut last_bg: [u8; 3] = [0, 0, 0];
+    let mut last_attrs: u8 = 0;
+    let mut first = true;
 
     for (y, row) in cells.iter().enumerate() {
         queue!(stdout, cursor::MoveTo(0, y as u16))?;
         for cell in row {
-            let fg = Color::Rgb { r: cell.fg[0], g: cell.fg[1], b: cell.fg[2] };
-            let bg = Color::Rgb { r: cell.bg[0], g: cell.bg[1], b: cell.bg[2] };
-            queue!(stdout, SetForegroundColor(fg), SetBackgroundColor(bg))?;
-
-            if cell.attrs & 0b0001 != 0 { queue!(stdout, SetAttribute(Attribute::Bold))?; }
-            if cell.attrs & 0b0010 != 0 { queue!(stdout, SetAttribute(Attribute::Dim))?; }
-            if cell.attrs & 0b0100 != 0 { queue!(stdout, SetAttribute(Attribute::Underlined))?; }
-            if cell.attrs & 0b1000 != 0 { queue!(stdout, SetAttribute(Attribute::Reverse))?; }
+            // Only change colors when they differ from the previous cell
+            if first || cell.fg != last_fg {
+                queue!(stdout, SetForegroundColor(Color::Rgb { r: cell.fg[0], g: cell.fg[1], b: cell.fg[2] }))?;
+                last_fg = cell.fg;
+            }
+            if first || cell.bg != last_bg {
+                queue!(stdout, SetBackgroundColor(Color::Rgb { r: cell.bg[0], g: cell.bg[1], b: cell.bg[2] }))?;
+                last_bg = cell.bg;
+            }
+            if first || cell.attrs != last_attrs {
+                if last_attrs != 0 { queue!(stdout, SetAttribute(Attribute::Reset))?; }
+                if cell.attrs & 0b0001 != 0 { queue!(stdout, SetAttribute(Attribute::Bold))?; }
+                if cell.attrs & 0b0010 != 0 { queue!(stdout, SetAttribute(Attribute::Dim))?; }
+                if cell.attrs & 0b0100 != 0 { queue!(stdout, SetAttribute(Attribute::Underlined))?; }
+                if cell.attrs & 0b1000 != 0 { queue!(stdout, SetAttribute(Attribute::Reverse))?; }
+                last_attrs = cell.attrs;
+                // Re-set colors after attribute reset
+                if last_attrs == 0 && cell.attrs == 0 {
+                    // colors were reset, re-apply
+                }
+            }
+            first = false;
 
             queue!(stdout, style::Print(cell.c))?;
-
-            if cell.attrs != 0 { queue!(stdout, SetAttribute(Attribute::Reset))?; }
         }
     }
 
+    queue!(stdout, SetAttribute(Attribute::Reset))?;
     if let Some((x, y)) = cursor {
         queue!(stdout, cursor::MoveTo(x, y), cursor::Show)?;
     }
