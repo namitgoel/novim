@@ -21,13 +21,39 @@ use crate::transport;
 
 /// Run the remote server. Reads from stdin, writes to stdout.
 pub fn run_server(path: Option<&str>) -> io::Result<()> {
-    let stdin = io::stdin();
-    let mut stdin_reader = BufReader::new(stdin.lock());
+    // Use a single BufReader for stdin — read Hello, then pass to reader thread.
+    // We use a channel-based approach: reader thread owns stdin entirely.
+    let (input_tx, input_rx) = mpsc::channel::<ClientMessage>();
+    let (hello_tx, hello_rx) = mpsc::sync_channel::<ClientMessage>(1);
+
+    // Spawn stdin reader thread immediately
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut reader = BufReader::new(stdin.lock());
+        // First message goes to hello channel
+        if let Some(msg) = transport::read_message::<ClientMessage>(&mut reader) {
+            if hello_tx.send(msg).is_err() { return; }
+        } else {
+            return;
+        }
+        // Subsequent messages go to input channel
+        loop {
+            match transport::read_message::<ClientMessage>(&mut reader) {
+                Some(msg) => {
+                    eprintln!("[novim-serve] Got input: {:?}", std::mem::discriminant(&msg));
+                    if input_tx.send(msg).is_err() { break; }
+                }
+                None => break,
+            }
+        }
+        eprintln!("[novim-serve] Stdin reader exited");
+    });
+
     let mut stdout = BufWriter::new(io::stdout().lock());
 
-    // Read Hello message (before spawning reader thread)
-    let hello: ClientMessage = transport::read_message(&mut stdin_reader)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "No Hello message"))?;
+    // Read Hello from the reader thread
+    let hello = hello_rx.recv()
+        .map_err(|_| io::Error::new(io::ErrorKind::UnexpectedEof, "No Hello message"))?;
 
     let (width, height) = match hello {
         ClientMessage::Hello { version, width, height } => {
@@ -65,26 +91,6 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
 
     let mut prev_cells: Vec<Vec<StyledCell>> = Vec::new();
     let mut screen_area = novim_types::Rect::new(0, 0, width, height);
-
-    // Drop the locked stdin reader, spawn a new one in the reader thread
-    drop(stdin_reader);
-
-    // Spawn a reader thread for non-blocking stdin
-    let (input_tx, input_rx) = mpsc::channel::<ClientMessage>();
-    thread::spawn(move || {
-        let stdin = io::stdin();
-        let mut reader = BufReader::new(stdin.lock());
-        loop {
-            match transport::read_message::<ClientMessage>(&mut reader) {
-                Some(msg) => {
-                    if input_tx.send(msg).is_err() {
-                        break;
-                    }
-                }
-                None => break,
-            }
-        }
-    });
 
     // Log to stderr (which SSH forwards to the client's terminal as errors)
     eprintln!("[novim-serve] Server started, {}x{}", width, height);
