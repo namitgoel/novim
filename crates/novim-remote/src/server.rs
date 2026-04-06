@@ -19,6 +19,26 @@ use novim_tui::renderer;
 use crate::protocol::*;
 use crate::transport;
 
+use std::fs::OpenOptions;
+
+/// Simple file logger for the server (can't use stderr — client swallows it).
+fn slog(msg: &str) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let log_path = format!("{}/.novim/serve.log", home);
+    let _ = std::fs::create_dir_all(format!("{}/.novim", home));
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&log_path) {
+        use std::io::Write;
+        let _ = writeln!(f, "[{}] {}", chrono_lite(), msg);
+    }
+}
+
+fn chrono_lite() -> String {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:03}", dur.as_secs(), dur.subsec_millis())
+}
+
 /// Run the remote server. Reads from stdin, writes to stdout.
 pub fn run_server(path: Option<&str>) -> io::Result<()> {
     // Use a single BufReader for stdin — read Hello, then pass to reader thread.
@@ -40,16 +60,18 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
         loop {
             match transport::read_message::<ClientMessage>(&mut reader) {
                 Some(msg) => {
-                    eprintln!("[novim-serve] Got input: {:?}", std::mem::discriminant(&msg));
+                    slog(&format!("Got input: {:?}", std::mem::discriminant(&msg)));
                     if input_tx.send(msg).is_err() { break; }
                 }
                 None => break,
             }
         }
-        eprintln!("[novim-serve] Stdin reader exited");
+        slog("Stdin reader exited");
     });
 
     let mut stdout = BufWriter::new(io::stdout().lock());
+
+    slog("Waiting for Hello...");
 
     // Read Hello from the reader thread
     let hello = hello_rx.recv()
@@ -65,6 +87,7 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "Protocol version mismatch"));
             }
             transport::write_message(&mut stdout, &ServerMessage::HelloAck { version: PROTOCOL_VERSION })?;
+            slog(&format!("HelloAck sent, {}x{}", width, height));
             (width, height)
         }
         _ => {
@@ -93,9 +116,11 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
     let mut screen_area = novim_types::Rect::new(0, 0, width, height);
 
     // Log to stderr (which SSH forwards to the client's terminal as errors)
-    eprintln!("[novim-serve] Server started, {}x{}", width, height);
+    slog(&format!("Server started, {}x{}", width, height));
+    slog("EditorState created, entering main loop");
 
     let mut running = true;
+    let mut frame_count = 0u64;
     while running {
         // 1. Poll terminals, tasks, plugins
         for ws in state.tabs.iter_mut() {
@@ -156,7 +181,8 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
 
         if cells != prev_cells {
             let cell_count: usize = cells.iter().map(|r| r.len()).sum();
-            eprintln!("[novim-serve] Sending frame: {}x{} ({} cells)", w, h, cell_count);
+            slog(&format!("Sending frame #{}: {}x{} ({} cells)", frame_count, w, h, cell_count));
+            frame_count += 1;
             transport::write_message(&mut stdout, &ServerMessage::Frame {
                 cells: cells.clone(),
                 cursor: cursor_pos,
