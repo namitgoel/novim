@@ -325,11 +325,103 @@ fn reconstruct_key(code: &str, mods: u8) -> KeyEvent {
 }
 
 /// Process a key event through the editor's dispatch logic. Returns ExecOutcome.
+/// Mirrors the key routing in TerminalManager::run() (novim-tui/src/lib.rs).
 fn process_key_event(
     state: &mut EditorState,
     key: KeyEvent,
     screen_area: novim_types::Rect,
 ) -> Result<novim_core::editor::ExecOutcome, novim_core::error::NovimError> {
+    use novim_core::input::EditorCommand;
+
+    // Welcome screen: only accept e/t/f/?/q
+    if state.show_welcome {
+        let cmd = match key.code {
+            KeyCode::Char('e') => Some(EditorCommand::SwitchMode(novim_types::EditorMode::Insert)),
+            KeyCode::Char('t') => Some(EditorCommand::OpenTerminal),
+            KeyCode::Char('f') => Some(EditorCommand::OpenFileFinder),
+            KeyCode::Char('?') => Some(EditorCommand::ToggleHelp),
+            KeyCode::Char('q') => Some(EditorCommand::Quit),
+            _ => None,
+        };
+        if let Some(cmd) = cmd {
+            state.show_welcome = false;
+            return state.execute(cmd, screen_area);
+        }
+        return Ok(novim_core::editor::ExecOutcome::Continue);
+    }
+
+    // File finder active
+    if state.finder.visible {
+        let cmd = match key.code {
+            KeyCode::Esc => EditorCommand::FinderDismiss,
+            KeyCode::Enter => EditorCommand::FinderAccept,
+            KeyCode::Up => EditorCommand::FinderUp,
+            KeyCode::Down => EditorCommand::FinderDown,
+            KeyCode::Backspace => EditorCommand::FinderBackspace,
+            KeyCode::Char(c) => EditorCommand::FinderInput(c),
+            _ => EditorCommand::Noop,
+        };
+        return state.execute(cmd, screen_area);
+    }
+
+    // Completion menu active
+    if state.completion.visible && !state.completion.items.is_empty() {
+        let cmd = match key.code {
+            KeyCode::Up => EditorCommand::CompletionUp,
+            KeyCode::Down => EditorCommand::CompletionDown,
+            KeyCode::Enter | KeyCode::Tab => EditorCommand::CompletionAccept,
+            KeyCode::Esc => EditorCommand::CompletionDismiss,
+            _ => EditorCommand::CompletionDismiss,
+        };
+        return state.execute(cmd, screen_area);
+    }
+
+    // Symbol list active
+    if state.symbol_list.visible {
+        let cmd = match key.code {
+            KeyCode::Esc => EditorCommand::SymbolDismiss,
+            KeyCode::Enter => EditorCommand::SymbolAccept,
+            KeyCode::Up => EditorCommand::SymbolUp,
+            KeyCode::Down => EditorCommand::SymbolDown,
+            KeyCode::Backspace => EditorCommand::SymbolBackspace,
+            KeyCode::Char(c) => EditorCommand::SymbolInput(c),
+            _ => EditorCommand::Noop,
+        };
+        return state.execute(cmd, screen_area);
+    }
+
+    // Command window
+    if state.command_window.visible {
+        let cmd = match key.code {
+            KeyCode::Char('k') | KeyCode::Up => {
+                if state.command_window.selected > 0 { state.command_window.selected -= 1; }
+                EditorCommand::Noop
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if state.command_window.selected + 1 < state.command_history.len() {
+                    state.command_window.selected += 1;
+                }
+                EditorCommand::Noop
+            }
+            KeyCode::Enter => {
+                if let Some(cmd_str) = state.command_history.get(state.command_window.selected).cloned() {
+                    state.command_window.visible = false;
+                    novim_core::input::parse_ex_command(&cmd_str)
+                } else { EditorCommand::Noop }
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                state.command_window.visible = false;
+                EditorCommand::Noop
+            }
+            _ => EditorCommand::Noop,
+        };
+        if !matches!(cmd, EditorCommand::Noop) {
+            return state.execute(cmd, screen_area);
+        }
+        return Ok(novim_core::editor::ExecOutcome::Continue);
+    }
+
+    // Default: normal key dispatch
     let in_terminal = state.focused_buf().is_terminal();
     let popup_showing = state.show_help
         || state.tabs[state.active_tab].show_buffer_list
