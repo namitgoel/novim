@@ -151,13 +151,17 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
                     match process_key_event(&mut state, key_event, screen_area) {
                         Ok(novim_core::editor::ExecOutcome::Quit) => {
                             slog("Quit requested");
+                            let _ = transport::write_message(&mut stdout, &ServerMessage::Bye);
                             running = false;
+                            continue; // skip render, exit immediately
                         }
                         Ok(_) => {
                             slog(&format!("Key processed OK, mode={:?}", state.mode));
                         }
                         Err(e) => {
                             slog(&format!("Key error: {}", e));
+                            // Show error in status bar, don't crash
+                            state.status_message = Some(format!("{}", e));
                         }
                     }
                 }
@@ -176,8 +180,10 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
                     let _ = transport::write_message(&mut stdout, &ServerMessage::Pong);
                 }
                 ClientMessage::Disconnect => {
+                    slog("Client disconnect");
                     let _ = transport::write_message(&mut stdout, &ServerMessage::Bye);
                     running = false;
+                    continue;
                 }
                 ClientMessage::Hello { .. } => {}
             }
@@ -204,8 +210,9 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
                 cells: cells.clone(),
                 cursor: None,
             }) {
-                slog(&format!("WRITE ERROR: {}", e));
+                slog(&format!("WRITE ERROR (client disconnected?): {}", e));
                 running = false;
+                continue;
             }
             prev_cells = cells;
         }

@@ -114,7 +114,9 @@ fn run_client_loop(
 ) -> io::Result<()> {
     loop {
         // 1. Check for received frames from server
+        let mut got_any = false;
         while let Ok(msg) = rx.try_recv() {
+            got_any = true;
             match msg {
                 ServerMessage::Frame { cells, cursor } => {
                     let rows = cells.len();
@@ -136,6 +138,12 @@ fn run_client_loop(
                 ServerMessage::HelloAck { .. } => {} // ignore
             }
         }
+        // If no messages and channel is dead, server exited
+        if !got_any {
+            if let Err(mpsc::TryRecvError::Disconnected) = rx.try_recv() {
+                return Ok(());
+            }
+        }
 
         // 2. Check for local input
         if event::poll(Duration::from_millis(16))? {
@@ -144,7 +152,9 @@ fn run_client_loop(
                     let code = key_to_string(&key);
                     let mods = key.modifiers.bits() as u8;
                     log::info!("[novim-ssh] Sending key: code={}, mods={}", code, mods);
-                    transport::write_message(writer, &ClientMessage::Key { code, modifiers: mods })?;
+                    if transport::write_message(writer, &ClientMessage::Key { code, modifiers: mods }).is_err() {
+                        return Ok(()); // Server disconnected
+                    }
                 }
                 Event::Mouse(mouse) => {
                     let kind = match mouse.kind {
@@ -153,15 +163,15 @@ fn run_client_loop(
                         event::MouseEventKind::ScrollDown => "ScrollDown",
                         _ => continue,
                     };
-                    transport::write_message(writer, &ClientMessage::Mouse {
+                    let _ = transport::write_message(writer, &ClientMessage::Mouse {
                         kind: kind.to_string(),
                         col: mouse.column,
                         row: mouse.row,
                         modifiers: mouse.modifiers.bits() as u8,
-                    })?;
+                    });
                 }
                 Event::Resize(w, h) => {
-                    transport::write_message(writer, &ClientMessage::Resize { width: w, height: h })?;
+                    let _ = transport::write_message(writer, &ClientMessage::Resize { width: w, height: h });
                 }
                 _ => {}
             }
