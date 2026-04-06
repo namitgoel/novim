@@ -142,9 +142,19 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
         while let Ok(msg) = input_rx.try_recv() {
             match msg {
                 ClientMessage::Key { code, modifiers } => {
+                    slog(&format!("Processing key: code={}, mods={}", code, modifiers));
                     let key_event = reconstruct_key(&code, modifiers);
-                    if let Ok(novim_core::editor::ExecOutcome::Quit) = process_key_event(&mut state, key_event, screen_area) {
-                        running = false;
+                    match process_key_event(&mut state, key_event, screen_area) {
+                        Ok(novim_core::editor::ExecOutcome::Quit) => {
+                            slog("Quit requested");
+                            running = false;
+                        }
+                        Ok(_) => {
+                            slog(&format!("Key processed OK, mode={:?}", state.mode));
+                        }
+                        Err(e) => {
+                            slog(&format!("Key error: {}", e));
+                        }
                     }
                 }
                 ClientMessage::Mouse { kind, col, row, modifiers: _ } => {
@@ -179,7 +189,8 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
         let cells = extract_cells(terminal.backend(), w, h);
         let cursor_pos = None; // cursor is embedded in the rendered cells
 
-        if cells != prev_cells {
+        let changed = cells != prev_cells;
+        if changed {
             let cell_count: usize = cells.iter().map(|r| r.len()).sum();
             slog(&format!("Sending frame #{}: {}x{} ({} cells)", frame_count, w, h, cell_count));
             frame_count += 1;
