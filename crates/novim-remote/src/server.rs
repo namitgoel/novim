@@ -41,6 +41,10 @@ fn chrono_lite() -> String {
 
 /// Run the remote server. Reads from stdin, writes to stdout.
 pub fn run_server(path: Option<&str>) -> io::Result<()> {
+    // Catch panics and log them
+    std::panic::set_hook(Box::new(|info| {
+        slog(&format!("PANIC: {}", info));
+    }));
     // Use a single BufReader for stdin — read Hello, then pass to reader thread.
     // We use a channel-based approach: reader thread owns stdin entirely.
     let (input_tx, input_rx) = mpsc::channel::<ClientMessage>();
@@ -180,24 +184,29 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
         }
 
         // 3. Render to TestBackend
-        terminal.draw(|f| renderer::render(f, &mut state))?;
+        if let Err(e) = terminal.draw(|f| renderer::render(f, &mut state)) {
+            slog(&format!("RENDER ERROR: {}", e));
+            continue;
+        }
 
         // 4. Extract cells and send frame if changed
         let buf = terminal.backend().buffer();
         let w = buf.area.width;
         let h = buf.area.height;
         let cells = extract_cells(terminal.backend(), w, h);
-        let cursor_pos = None; // cursor is embedded in the rendered cells
 
         let changed = cells != prev_cells;
         if changed {
             let cell_count: usize = cells.iter().map(|r| r.len()).sum();
             slog(&format!("Sending frame #{}: {}x{} ({} cells)", frame_count, w, h, cell_count));
             frame_count += 1;
-            transport::write_message(&mut stdout, &ServerMessage::Frame {
+            if let Err(e) = transport::write_message(&mut stdout, &ServerMessage::Frame {
                 cells: cells.clone(),
-                cursor: cursor_pos,
-            })?;
+                cursor: None,
+            }) {
+                slog(&format!("WRITE ERROR: {}", e));
+                running = false;
+            }
             prev_cells = cells;
         }
 
