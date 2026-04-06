@@ -105,11 +105,18 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
             let p_path = std::path::Path::new(p);
             if p_path.is_dir() {
                 EditorState::with_dir(p)?
-            } else {
+            } else if p_path.exists() {
                 EditorState::with_file(p)?
+            } else {
+                // File doesn't exist — open terminal + create new file on first save
+                slog(&format!("File not found: {}, opening terminal", p));
+                let mut state = EditorState::new_terminal(height, width)?;
+                state.status_message = Some(format!("File not found: {}", p));
+                state
             }
         }
-        None => EditorState::new_welcome(),
+        // No path — open terminal (you're SSHing in, you want a shell)
+        None => EditorState::new_terminal(height, width)?,
     };
 
     // Create virtual terminal for rendering
@@ -261,7 +268,8 @@ fn color_to_rgb(color: ratatui::style::Color) -> (u8, u8, u8) {
         ratatui::style::Color::Blue => (97, 175, 239),
         ratatui::style::Color::Magenta => (198, 120, 221),
         ratatui::style::Color::Cyan => (86, 182, 194),
-        ratatui::style::Color::White | ratatui::style::Color::Reset => (220, 220, 220),
+        ratatui::style::Color::White => (220, 220, 220),
+        ratatui::style::Color::Reset => (30, 30, 46),  // dark background (catppuccin-style)
         ratatui::style::Color::DarkGray => (100, 100, 100),
         ratatui::style::Color::LightRed => (240, 140, 140),
         ratatui::style::Color::LightGreen => (180, 220, 160),
