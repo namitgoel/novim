@@ -125,7 +125,13 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
 
     let mut running = true;
     let mut frame_count = 0u64;
+    let mut send_count = 0u64;
     while running {
+        frame_count += 1;
+        if frame_count % 100 == 0 {
+            slog(&format!("Loop iteration #{}", frame_count));
+        }
+
         // 1. Poll terminals, tasks, plugins
         for ws in state.tabs.iter_mut() {
             ws.poll_terminals();
@@ -134,12 +140,6 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
         let timer_actions = state.plugins.poll_timers();
         if !timer_actions.is_empty() {
             state.run_plugin_actions(timer_actions, screen_area);
-        }
-        state.check_external_changes();
-
-        // Reparse highlights
-        if !state.focused_buf().is_terminal() {
-            state.focused_buf_mut().reparse_highlights();
         }
 
         // 2. Process all pending input from the reader thread
@@ -198,8 +198,8 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
         let changed = cells != prev_cells;
         if changed {
             let cell_count: usize = cells.iter().map(|r| r.len()).sum();
-            slog(&format!("Sending frame #{}: {}x{} ({} cells)", frame_count, w, h, cell_count));
-            frame_count += 1;
+            slog(&format!("Sending frame #{}: {}x{} ({} cells)", send_count, w, h, cell_count));
+            send_count += 1;
             if let Err(e) = transport::write_message(&mut stdout, &ServerMessage::Frame {
                 cells: cells.clone(),
                 cursor: None,
