@@ -74,6 +74,8 @@ pub fn connect(destination: &str, path: Option<&str>) -> io::Result<()> {
         }
     }
 
+    eprintln!("[novim-ssh] Connected! Setting up terminal...");
+
     // NOW setup local terminal (only after successful handshake)
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -115,6 +117,9 @@ fn run_client_loop(
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 ServerMessage::Frame { cells, cursor } => {
+                    let rows = cells.len();
+                    let cols = cells.first().map(|r| r.len()).unwrap_or(0);
+                    log::info!("[novim-ssh] Got frame: {}x{}", cols, rows);
                     paint_frame(stdout, &cells, cursor)?;
                 }
                 ServerMessage::Delta { changes, cursor } => {

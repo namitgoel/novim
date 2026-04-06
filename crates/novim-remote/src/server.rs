@@ -86,6 +86,9 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
         }
     });
 
+    // Log to stderr (which SSH forwards to the client's terminal as errors)
+    eprintln!("[novim-serve] Server started, {}x{}", width, height);
+
     let mut running = true;
     while running {
         // 1. Poll terminals, tasks, plugins
@@ -146,6 +149,8 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
         let cursor_pos = None; // cursor is embedded in the rendered cells
 
         if cells != prev_cells {
+            let cell_count: usize = cells.iter().map(|r| r.len()).sum();
+            eprintln!("[novim-serve] Sending frame: {}x{} ({} cells)", w, h, cell_count);
             transport::write_message(&mut stdout, &ServerMessage::Frame {
                 cells: cells.clone(),
                 cursor: cursor_pos,

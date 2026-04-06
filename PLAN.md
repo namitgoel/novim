@@ -687,6 +687,7 @@ examples/plugins/
 ## v3.0.0 — Future
 
 ### Near-term
+- **Powerline status bar via plugin** — `novim.statusline.set()` Lua API for colored segments with icons/arrows, `StatusSegment` type, example `statusline.lua` plugin
 - AI code completion (ghost text from LLM APIs, Tab to accept)
 - Full Vim compatibility layer
 
@@ -695,5 +696,4 @@ examples/plugins/
 
 ### Long-term
 - Collaborative editing (CRDT-based)
-- Remote development (SSH + local GUI)
 - Web version (WASM + WebGPU)
