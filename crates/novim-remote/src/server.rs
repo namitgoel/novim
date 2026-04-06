@@ -4,6 +4,8 @@
 //! sends ServerMessage (cell grid) to stdout.
 
 use std::io::{self, BufReader, BufWriter};
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -19,11 +21,12 @@ use crate::transport;
 
 /// Run the remote server. Reads from stdin, writes to stdout.
 pub fn run_server(path: Option<&str>) -> io::Result<()> {
-    // Read the Hello message to get terminal dimensions
-    let mut stdin = BufReader::new(io::stdin().lock());
+    let stdin = io::stdin();
+    let mut stdin_reader = BufReader::new(stdin.lock());
     let mut stdout = BufWriter::new(io::stdout().lock());
 
-    let hello: ClientMessage = transport::read_message(&mut stdin)
+    // Read Hello message (before spawning reader thread)
+    let hello: ClientMessage = transport::read_message(&mut stdin_reader)
         .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "No Hello message"))?;
 
     let (width, height) = match hello {
@@ -63,7 +66,28 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
     let mut prev_cells: Vec<Vec<StyledCell>> = Vec::new();
     let mut screen_area = novim_types::Rect::new(0, 0, width, height);
 
-    loop {
+    // Drop the locked stdin reader, spawn a new one in the reader thread
+    drop(stdin_reader);
+
+    // Spawn a reader thread for non-blocking stdin
+    let (input_tx, input_rx) = mpsc::channel::<ClientMessage>();
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut reader = BufReader::new(stdin.lock());
+        loop {
+            match transport::read_message::<ClientMessage>(&mut reader) {
+                Some(msg) => {
+                    if input_tx.send(msg).is_err() {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+    });
+
+    let mut running = true;
+    while running {
         // 1. Poll terminals, tasks, plugins
         for ws in state.tabs.iter_mut() {
             ws.poll_terminals();
@@ -80,29 +104,14 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
             state.focused_buf_mut().reparse_highlights();
         }
 
-        // 2. Render to TestBackend
-        terminal.draw(|f| renderer::render(f, &mut state))?;
-
-        // 3. Extract cells and send frame
-        let cells = extract_cells(terminal.backend(), width, height);
-        let cursor_pos = get_cursor_position(&terminal);
-
-        if cells != prev_cells {
-            // Send full frame (delta compression can be added in Phase 2)
-            transport::write_message(&mut stdout, &ServerMessage::Frame {
-                cells: cells.clone(),
-                cursor: cursor_pos,
-            })?;
-            prev_cells = cells;
-        }
-
-        // 4. Read input (non-blocking with short timeout)
-        // Use a thread to make stdin non-blocking
-        if let Some(msg) = transport::try_read_message::<ClientMessage>(&mut stdin) {
+        // 2. Process all pending input from the reader thread
+        while let Ok(msg) = input_rx.try_recv() {
             match msg {
                 ClientMessage::Key { code, modifiers } => {
                     let key_event = reconstruct_key(&code, modifiers);
-                    process_key_event(&mut state, key_event, screen_area);
+                    if let Ok(novim_core::editor::ExecOutcome::Quit) = process_key_event(&mut state, key_event, screen_area) {
+                        running = false;
+                    }
                 }
                 ClientMessage::Mouse { kind, col, row, modifiers: _ } => {
                     process_mouse_event(&mut state, &kind, col, row, screen_area);
@@ -110,24 +119,42 @@ pub fn run_server(path: Option<&str>) -> io::Result<()> {
                 ClientMessage::Resize { width: w, height: h } => {
                     terminal.backend_mut().resize(w, h);
                     screen_area = novim_types::Rect::new(0, 0, w, h);
-                    prev_cells.clear(); // Force full frame on resize
+                    prev_cells.clear();
                     for ws in state.tabs.iter_mut() {
                         ws.resize_terminals(h.saturating_sub(2), w.saturating_sub(2));
                     }
                 }
                 ClientMessage::Ping => {
-                    transport::write_message(&mut stdout, &ServerMessage::Pong)?;
+                    let _ = transport::write_message(&mut stdout, &ServerMessage::Pong);
                 }
                 ClientMessage::Disconnect => {
-                    transport::write_message(&mut stdout, &ServerMessage::Bye)?;
-                    break;
+                    let _ = transport::write_message(&mut stdout, &ServerMessage::Bye);
+                    running = false;
                 }
-                ClientMessage::Hello { .. } => {} // Ignore duplicate hello
+                ClientMessage::Hello { .. } => {}
             }
         }
 
-        // Small sleep to avoid busy-waiting
-        std::thread::sleep(Duration::from_millis(16));
+        // 3. Render to TestBackend
+        terminal.draw(|f| renderer::render(f, &mut state))?;
+
+        // 4. Extract cells and send frame if changed
+        let buf = terminal.backend().buffer();
+        let w = buf.area.width;
+        let h = buf.area.height;
+        let cells = extract_cells(terminal.backend(), w, h);
+        let cursor_pos = None; // cursor is embedded in the rendered cells
+
+        if cells != prev_cells {
+            transport::write_message(&mut stdout, &ServerMessage::Frame {
+                cells: cells.clone(),
+                cursor: cursor_pos,
+            })?;
+            prev_cells = cells;
+        }
+
+        // 5. Small sleep to avoid busy-waiting
+        thread::sleep(Duration::from_millis(16));
     }
 
     Ok(())
@@ -208,13 +235,6 @@ fn indexed_to_rgb(idx: u8) -> (u8, u8, u8) {
     }
 }
 
-/// Get cursor position from the terminal.
-fn get_cursor_position(_terminal: &Terminal<TestBackend>) -> Option<(u16, u16)> {
-    // TestBackend tracks cursor position via hide_cursor/show_cursor
-    // For now, return None — cursor is embedded in the rendered cells
-    None
-}
-
 /// Reconstruct a crossterm KeyEvent from serialized key string and modifier bitmask.
 fn reconstruct_key(code: &str, mods: u8) -> KeyEvent {
     let modifiers = KeyModifiers::from_bits_truncate(mods);
@@ -247,8 +267,12 @@ fn reconstruct_key(code: &str, mods: u8) -> KeyEvent {
     KeyEvent::new(key_code, modifiers)
 }
 
-/// Process a key event through the editor's dispatch logic.
-fn process_key_event(state: &mut EditorState, key: KeyEvent, screen_area: novim_types::Rect) {
+/// Process a key event through the editor's dispatch logic. Returns ExecOutcome.
+fn process_key_event(
+    state: &mut EditorState,
+    key: KeyEvent,
+    screen_area: novim_types::Rect,
+) -> Result<novim_core::editor::ExecOutcome, novim_core::error::NovimError> {
     let in_terminal = state.focused_buf().is_terminal();
     let popup_showing = state.show_help
         || state.tabs[state.active_tab].show_buffer_list
@@ -261,14 +285,11 @@ fn process_key_event(state: &mut EditorState, key: KeyEvent, screen_area: novim_
         key,
         in_terminal,
         popup_showing,
-        false, // not gui_mode
+        false,
         state.macros.recording.is_some(),
     );
     state.input_state = new_input_state;
-
-    if let Ok(novim_core::editor::ExecOutcome::Quit) = state.execute(cmd, screen_area) {
-        // Server will exit on the next loop iteration when it detects stdin EOF
-    }
+    state.execute(cmd, screen_area)
 }
 
 /// Process a mouse event.
