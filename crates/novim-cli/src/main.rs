@@ -50,6 +50,21 @@ enum Commands {
         /// Shell to generate completions for
         shell: Shell,
     },
+    /// Connect to a remote machine via SSH
+    Ssh {
+        /// SSH destination (user@host)
+        destination: String,
+        /// Remote path to open
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Run as a remote headless server (internal, launched by SSH)
+    #[command(hide = true)]
+    Serve {
+        /// Path to open on the remote machine
+        #[arg(long)]
+        path: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -75,6 +90,8 @@ fn main() {
         Some(Commands::List) => run_list(),
         Some(Commands::Config { action }) => run_config(action),
         Some(Commands::Completions { shell }) => run_completions(shell),
+        Some(Commands::Ssh { destination, path }) => run_ssh(&destination, path.as_deref()),
+        Some(Commands::Serve { path }) => run_serve(path.as_deref()),
         None => match cli.path {
             Some(ref path) => {
                 let p = std::path::Path::new(path);
@@ -201,4 +218,14 @@ fn init_debug_logger() {
         .format_timestamp_millis()
         .init();
     log::info!("Debug logging enabled, writing to {}", log_path.display());
+}
+
+/// Connect to a remote machine via SSH.
+fn run_ssh(destination: &str, path: Option<&str>) -> io::Result<()> {
+    novim_remote::client::connect(destination, path)
+}
+
+/// Run as a remote headless server (launched by SSH on the remote machine).
+fn run_serve(path: Option<&str>) -> io::Result<()> {
+    novim_remote::server::run_server(path)
 }

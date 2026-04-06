@@ -1,0 +1,14 @@
+[package]
+name = "novim-remote"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+novim-core = { path = "../novim-core" }
+novim-tui = { path = "../novim-tui" }
+novim-types = { path = "../novim-types" }
+log = { workspace = true }

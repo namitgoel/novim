@@ -672,6 +672,18 @@ examples/plugins/
 
 ---
 
+## v2.2.0 — Polish
+
+### Bug Fixes
+- **`:q` should check all dirty buffers** — currently only checks the focused pane; users can lose unsaved work in other panes. Should warn about ALL dirty buffers across all panes before quitting.
+
+### UX Improvements
+- **`:set all` show all options** — currently only shows 5 options (ts, et, ai, wrap, ln). Should also display: minimap, text_width, scroll_lines, mouse_scroll_lines, finder_preview.
+- **Feedback for invalid commands** — `Noop` commands are silently ignored. Invalid key sequences and unrecognized ex-commands should show a brief status message ("Unknown command: foo" or "Invalid key sequence").
+- **Async git branch detection** — `git branch --show-current` runs synchronously at startup, blocking the editor. Should run on a background thread via `TaskRunner` and populate the status bar when ready.
+
+---
+
 ## v3.0.0 — Future
 
 ### Near-term
@@ -680,7 +692,6 @@ examples/plugins/
 
 ### Medium-term
 - DAP (Debug Adapter Protocol) — breakpoints, stepping, variable inspection
-- LSP migration to plugin (requires async plugin model)
 
 ### Long-term
 - Collaborative editing (CRDT-based)
