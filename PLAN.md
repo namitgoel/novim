@@ -687,7 +687,9 @@ examples/plugins/
 ## v3.0.0 — Future
 
 ### Near-term
+- **Theme system** — `~/.config/novim/themes/` directory with `.toml` theme files. `:colorscheme <name>` loads a theme. Persists across sessions by writing `theme = "catppuccin-mocha"` to `config.toml`. Ship built-in themes: Catppuccin (Mocha/Latte), Google Light/Dark, Dracula, One Dark/Light, Solarized Dark/Light. Support Base16 format import. Theme maps to existing ThemeConfig + SyntaxTheme fields.
 - **Powerline status bar via plugin** — `novim.statusline.set()` Lua API for colored segments with icons/arrows, `StatusSegment` type, example `statusline.lua` plugin
+- **Improved file finder** — integrate `fd`/`ripgrep` for faster search when available, fuzzy scoring (not just substring), respect `.gitignore`, preview improvements
 - AI code completion (ghost text from LLM APIs, Tab to accept)
 - Full Vim compatibility layer
 

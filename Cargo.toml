@@ -6,7 +6,6 @@ members = [
     "crates/novim-types",
     "crates/novim-cli",
     "crates/novim-gui",
-    "crates/novim-remote",
 ]
 resolver = "2"
 

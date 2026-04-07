@@ -13,7 +13,6 @@ path = "src/main.rs"
 [dependencies]
 novim-core = { workspace = true }
 novim-tui = { workspace = true }
-novim-remote = { path = "../novim-remote" }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 log = { workspace = true }

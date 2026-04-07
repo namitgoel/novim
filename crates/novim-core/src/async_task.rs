@@ -13,6 +13,8 @@ pub enum TaskResult {
     BlameData(std::collections::HashMap<usize, crate::buffer::BlameInfo>),
     /// Quickfix entries from :make.
     QuickfixEntries(Vec<crate::editor::QuickfixEntry>),
+    /// Git branch name detected in background.
+    GitBranch(Option<String>),
 }
 
 /// Manages background tasks with a channel for results.

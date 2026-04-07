@@ -1898,15 +1898,46 @@ impl EditorState {
 
     pub(super) fn handle_quit(&mut self) -> Result<ExecOutcome, NovimError> {
         let idx = self.active_tab;
-        if self.focused_buf().is_dirty() {
-            return Err(NovimError::Buffer(
-                "Unsaved changes! Use :q! to force quit or :wq to save and quit".to_string(),
-            ));
-        }
+
         if self.tabs[idx].panes.pane_count() > 1 {
+            // Closing one pane — only check the focused buffer
+            if self.focused_buf().is_dirty() {
+                return Err(NovimError::Buffer(
+                    "Unsaved changes! Use :q! to force quit or :wq to save and quit".to_string(),
+                ));
+            }
             self.tabs[idx].panes.close_focused();
+            // Clear diff highlights on remaining panes
+            let focused_id = self.tabs[idx].panes.focused_id();
+            if let Some(pane) = self.tabs[idx].panes.get_pane_mut(focused_id) {
+                if let crate::pane::PaneContent::Editor(buf) = &mut pane.content {
+                    if !buf.diff_lines.is_empty() {
+                        buf.diff_lines.clear();
+                    }
+                }
+            }
             Ok(ExecOutcome::Continue)
         } else {
+            // Closing last pane (quitting) — check ALL buffers across ALL panes
+            let mut dirty_files = Vec::new();
+            let core_area = novim_types::Rect::new(0, 0, 80, 24);
+            let layouts = self.tabs[idx].panes.layout(core_area);
+            for (pane_id, _) in &layouts {
+                if let Some(pane) = self.tabs[idx].panes.get_pane(*pane_id) {
+                    let buf = pane.content.as_buffer_like();
+                    if buf.is_dirty() {
+                        dirty_files.push(buf.display_name());
+                    }
+                }
+            }
+            if !dirty_files.is_empty() {
+                let msg = if dirty_files.len() == 1 {
+                    format!("Unsaved changes in {}! Use :q! to force quit or :wq to save and quit", dirty_files[0])
+                } else {
+                    format!("{} files with unsaved changes: {}. Use :q! or :wq", dirty_files.len(), dirty_files.join(", "))
+                };
+                return Err(NovimError::Buffer(msg));
+            }
             Ok(ExecOutcome::Quit)
         }
     }
@@ -2010,12 +2041,16 @@ impl EditorState {
         // Query: `:set all` shows all options, `:set tabstop?` shows one
         if opt == "all" {
             self.status_message = Some(format!(
-                "ts={} et={} ai={} wrap={} ln={}",
+                "ts={} et={} ai={} wrap={} ln={} minimap={} tw={} scroll={} mouse={}",
                 self.config.editor.tab_width,
                 self.config.editor.expand_tab,
                 self.config.editor.auto_indent,
                 self.config.editor.word_wrap,
                 self.config.editor.line_numbers,
+                self.config.editor.minimap,
+                self.config.editor.text_width,
+                self.config.editor.scroll_lines,
+                self.config.editor.mouse_scroll_lines,
             ));
             return Ok(ExecOutcome::Continue);
         }

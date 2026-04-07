@@ -194,14 +194,8 @@ impl EditorState {
         crate::plugin::builtins::register_builtins(&mut plugins);
         crate::plugin::builtins::register_lsp(&mut plugins, Arc::clone(&registry));
         plugins.load_lua_plugins();
-        let git_branch = std::process::Command::new("git")
-            .args(["branch", "--show-current"])
-            .output()
-            .ok()
-            .and_then(|o| {
-                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if s.is_empty() { None } else { Some(s) }
-            });
+        // Git branch detection runs async to avoid blocking startup
+        let git_branch = None;
         let load_errors = plugins.take_load_errors();
         let status_message = if !load_errors.is_empty() {
             Some(format!("Plugin errors: {}", load_errors.join("; ")))
@@ -253,6 +247,19 @@ impl EditorState {
             outline: OutlineState::default(),
             tasks: crate::async_task::TaskRunner::new(),
         };
+
+        // Detect git branch in background (non-blocking startup)
+        state.tasks.spawn(|| {
+            let branch = std::process::Command::new("git")
+                .args(["branch", "--show-current"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if s.is_empty() { None } else { Some(s) }
+                });
+            vec![crate::async_task::TaskResult::GitBranch(branch)]
+        });
 
         // Fire BufOpen for the initial buffer so the LSP plugin starts
         let snapshot = state.make_buffer_snapshot();
@@ -1321,6 +1328,9 @@ impl EditorState {
                     } else {
                         self.status_message = Some(":make — success".to_string());
                     }
+                }
+                crate::async_task::TaskResult::GitBranch(branch) => {
+                    self.git_branch = branch;
                 }
             }
         }
