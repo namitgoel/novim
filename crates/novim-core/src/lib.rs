@@ -26,5 +26,6 @@ pub mod pane;
 pub mod session;
 pub mod plugin;
 pub mod text_utils;
+pub mod theme;
 pub mod url;
 pub mod welcome;

@@ -118,6 +118,13 @@ pub fn complete_command_buffer(buffer: &str, plugin_commands: &[String]) -> Vec<
         }
         // :set — complete option names
         "set" => complete_option(args),
+        // :colorscheme — complete theme names
+        "colorscheme" | "colo" => {
+            let themes = crate::theme::available_themes();
+            themes.into_iter()
+                .filter(|t| t.starts_with(args) && t != args)
+                .collect()
+        }
         _ => Vec::new(),
     }
 }

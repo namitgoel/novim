@@ -1156,6 +1156,35 @@ impl EditorState {
                 }
                 Ok(ExecOutcome::Continue)
             }
+            EditorCommand::SetColorScheme(name) => {
+                if name.is_empty() {
+                    // List available themes
+                    let themes = crate::theme::available_themes();
+                    let current = self.config.colorscheme.as_deref().unwrap_or("default");
+                    let list: Vec<String> = themes.iter().map(|t| {
+                        if t == current { format!("*{}", t) } else { t.clone() }
+                    }).collect();
+                    self.status_message = Some(format!("Themes: {}", list.join(" | ")));
+                } else if let Some(scheme) = crate::theme::load_theme(name) {
+                    self.config.theme = scheme.to_theme_config();
+                    self.config.syntax_theme = scheme.to_syntax_theme();
+                    self.config.colorscheme = Some(name.clone());
+                    // Persist to config file
+                    if let Err(e) = persist_colorscheme(name) {
+                        self.status_message = Some(format!("Theme applied but save failed: {}", e));
+                    } else {
+                        self.status_message = Some(format!("Colorscheme: {}", name));
+                    }
+                    // Force re-highlight all buffers
+                    let idx = self.active_tab;
+                    if let crate::pane::PaneContent::Editor(buf) = &mut self.tabs[idx].panes.focused_pane_mut().content {
+                        buf.force_rehighlight();
+                    }
+                } else {
+                    self.status_message = Some(format!("Unknown colorscheme: {}", name));
+                }
+                Ok(ExecOutcome::Continue)
+            }
             EditorCommand::ToggleMinimap => {
                 self.config.editor.minimap = !self.config.editor.minimap;
                 self.status_message = Some(format!(
@@ -1381,6 +1410,37 @@ impl EditorState {
             self.outline.selected = closest.0;
         }
     }
+}
+
+/// Persist the colorscheme choice to config.toml.
+fn persist_colorscheme(name: &str) -> std::io::Result<()> {
+    let Some(path) = crate::config::config_path() else {
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "HOME not set"));
+    };
+
+    // Read existing config, update colorscheme field, write back
+    let mut content = std::fs::read_to_string(&path).unwrap_or_default();
+
+    if content.contains("colorscheme") {
+        // Replace existing colorscheme line
+        let mut new_lines = Vec::new();
+        for line in content.lines() {
+            if line.trim_start().starts_with("colorscheme") {
+                new_lines.push(format!("colorscheme = \"{}\"", name));
+            } else {
+                new_lines.push(line.to_string());
+            }
+        }
+        content = new_lines.join("\n");
+    } else {
+        // Append at the top
+        content = format!("colorscheme = \"{}\"\n{}", name, content);
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, content)
 }
 
 /// Plugin install directory: ~/.config/novim/plugins/

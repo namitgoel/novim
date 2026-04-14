@@ -207,6 +207,11 @@ impl Buffer {
         Self::new_with_parts(Rope::new(), None, None, None)
     }
 
+    /// Force re-highlight on next render (after theme change).
+    pub fn force_rehighlight(&mut self) {
+        self.highlights_dirty = true;
+    }
+
     /// Mark the buffer as clean (not dirty). Used for read-only diff buffers.
     pub fn mark_clean(&mut self) {
         self.dirty = false;

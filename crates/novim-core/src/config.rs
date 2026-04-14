@@ -17,6 +17,9 @@ pub struct NovimConfig {
     pub keybindings: KeybindingsConfig,
     pub gui: GuiConfig,
     pub status_bar: StatusBarConfig,
+    /// Active color scheme name (persisted across sessions).
+    #[serde(default)]
+    pub colorscheme: Option<String>,
 }
 
 /// GUI-specific configuration (font, window settings).
@@ -289,12 +292,13 @@ pub fn config_path() -> Option<PathBuf> {
 }
 
 /// Load configuration from disk, or return defaults.
+/// If a colorscheme is set, applies it on top of the config.
 pub fn load_config() -> NovimConfig {
     let Some(path) = config_path() else {
         return NovimConfig::default();
     };
 
-    match fs::read_to_string(&path) {
+    let mut config = match fs::read_to_string(&path) {
         Ok(content) => {
             toml::from_str(&content).unwrap_or_else(|e| {
                 eprintln!("Warning: config parse error: {}. Using defaults.", e);
@@ -302,7 +306,17 @@ pub fn load_config() -> NovimConfig {
             })
         }
         Err(_) => NovimConfig::default(),
+    };
+
+    // Apply colorscheme if set
+    if let Some(ref name) = config.colorscheme {
+        if let Some(scheme) = crate::theme::load_theme(name) {
+            config.theme = scheme.to_theme_config();
+            config.syntax_theme = scheme.to_syntax_theme();
+        }
     }
+
+    config
 }
 
 /// Save the default config as a template.

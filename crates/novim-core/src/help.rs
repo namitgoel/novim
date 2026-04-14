@@ -167,6 +167,7 @@ pub fn help_entries() -> Vec<HelpEntry> {
         Shortcut { key: ":set et/noet",      desc: "Expand tab on/off" },
         Shortcut { key: ":set ts=N",         desc: "Set tab width" },
         Shortcut { key: ":minimap",          desc: "Toggle code minimap" },
+        Shortcut { key: ":colorscheme <name>",desc: "Apply color theme" },
         Shortcut { key: "Ctrl+L",            desc: "Redraw screen" },
         Blank,
         Section("Copy Mode (Ctrl+W [)"),

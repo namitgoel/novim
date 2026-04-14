@@ -488,6 +488,8 @@ pub enum EditorCommand {
     PluginRemove(String),
     /// Toggle minimap
     ToggleMinimap,
+    /// :colorscheme <name> — apply a color scheme
+    SetColorScheme(String),
     /// Toggle symbol outline sidebar
     ToggleOutline,
 
@@ -1290,6 +1292,13 @@ static BUILTIN_COMMANDS: &[(&[&str], CmdParser)] = &[
     (&["symbols", "Symbols"],   |_| EditorCommand::SymbolList),
     (&["blame", "Gblame"],      |_| EditorCommand::ToggleBlame),
     (&["minimap"],              |_| EditorCommand::ToggleMinimap),
+    (&["colorscheme", "colo"],  |args| {
+        if args.is_empty() {
+            EditorCommand::SetColorScheme("".to_string()) // list themes
+        } else {
+            EditorCommand::SetColorScheme(args.to_string())
+        }
+    }),
     (&["outline", "Outline"],   |_| EditorCommand::ToggleOutline),
     (&["diff", "Gdiff"],        |_| EditorCommand::GitDiff),
     (&["PlugInstall"],          |args| {
